@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Prevent overlapping runs/deploys
+concurrency:
+  group: ocr-file-appservice
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,14 +24,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Optional local install to catch resolver errors early (can remove to speed up)
+      # Optional sanity check (can remove to speed up)
       - name: Create venv & install deps
         run: |
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
 
-      # Package the app into a zip (exclude venv, .git, GitHub workflows)
+      # Create a deployable zip (exclude venv, git, workflows, caches)
       - name: Create deployment zip
         run: |
           zip -r app.zip . \
