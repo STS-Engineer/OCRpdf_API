@@ -1,10 +1,19 @@
-clean-text[gpl]
-python-doctr[torch]
-libretranslatepy
-natsort
-nltk
-pyspellchecker
-torch
-tqdm
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ML stack (CPU)
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+python-doctr[torch]==0.8.1
+
+# Your libs (pinned to known-good)
+clean-text[gpl]==0.6.0
+libretranslatepy==2.1.4
+natsort==8.4.0
+nltk==3.9.2
+pyspellchecker==0.8.3
+tqdm==4.67.1
 rapidfuzz==2.13.7
-flask
+flask==3.0.3
+
+# Production server for Flask on App Service
+gunicorn==21.2.0
