@@ -5,95 +5,102 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# 🧱 Prevent overlapping deployments to this app/slot
+# Empêche les déploiements qui se chevauchent sur la même app
 concurrency:
   group: ocr-file-production
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  APP_NAME: ocr-file
+  RESOURCE_GROUP: <VOTRE_RESOURCE_GROUP>   # ex: Azure_Poitiers
+  PYTHON_VERSION: '3.11'
+  ARTIFACT_NAME: python-app
+  ZIP_NAME: app.zip
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      # Optional: quick sanity install (catches version conflicts early)
-      - name: Validate requirements (optional)
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install --upgrade pip
-          PIP_NO_BINARY=":none:" pip install -r requirements.txt || pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # (facultatif) tests rapides
+      # - name: Run tests
+      #   run: |
+      #     source .venv/bin/activate
+      #     pytest -q
+
+      - name: Create deploy ZIP
+        run: |
+          # Nettoyage de ce qu'on ne veut pas publier
+          rm -rf .git .github .venv **/__pycache__ **/*.log
+          zip -r "${ZIP_NAME}" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-app
-          path: |
-            .
-            !.venv/
-            !antenv/
-            !**/__pycache__/
-            !.git/
-            !.github/
-            !**/*.log
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ZIP_NAME }}
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
+    environment:
+      name: production
 
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: python-app
+          name: ${{ env.ARTIFACT_NAME }}
 
-      # ⏳ Wait until no deployment is in progress to avoid 409
-      - name: Wait for Kudu to be idle
-        env:
-          APP_NAME: ocr-file
-          PUBLISH_PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq libxml2-utils
-          echo "$PUBLISH_PROFILE" > publishProfile.xml
-          USERNAME=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userName)" publishProfile.xml)
-          PASSWORD=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userPWD)" publishProfile.xml)
-          DEPLOY_API="https://${APP_NAME}.scm.azurewebsites.net/api/deployments"
+      - name: Azure Login (Service Principal)
+        uses: azure/login@v2
+        with:
+          # Secret AZURE_CREDENTIALS = JSON Service Principal (tenant, sub, clientId, clientSecret)
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-          echo "Checking Kudu deployment queue for ${APP_NAME}…"
-          ATTEMPTS=0
-          until [ $ATTEMPTS -ge 60 ]; do
-            STATUS_JSON=$(curl -sf --user "$USERNAME:$PASSWORD" "$DEPLOY_API" || echo "[]")
-            # status: 3=pending, 4=building. If none match, we're idle.
-            BUSY=$(echo "$STATUS_JSON" | jq '[ .[] | select(.status == 3 or .status == 4) ] | length')
-            if [ "$BUSY" -eq 0 ]; then
-              echo "Kudu is idle."
-              break
-            fi
-            echo "Kudu busy (pending/building=$BUSY). Retrying in 10s…"
-            sleep 10
-            ATTEMPTS=$((ATTEMPTS+1))
-          done
-          if [ $ATTEMPTS -ge 60 ]; then
-            echo "Timed out waiting for Kudu to be idle." >&2
-            exit 1
-          fi
+      # (Optionnel mais utile sur plans chargés) Stopper l'app pour éviter les locks 409
+      - name: Stop Web App
+        run: az webapp stop -g "${{ env.RESOURCE_GROUP }}" -n "${{ env.APP_NAME }}"
 
-      - name: Deploy to Azure Web App
-        id: deploy-to-webapp
+      - name: Deploy to Azure Web App (OneDeploy ZIP)
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'ocr-file'
-          slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
+          app-name: ${{ env.APP_NAME }}
+          package: ${{ env.ZIP_NAME }}
+
+      - name: Start Web App
+        if: always()
+        run: az webapp start -g "${{ env.RESOURCE_GROUP }}" -n "${{ env.APP_NAME }}"
+
+      # (Optionnel) Petit warmup/healthcheck
+      # - name: Warm up
+      #   run: |
+      #     URL="https://${{ env.APP_NAME }}.azurewebsites.net/"
+      #     echo "Warming up $URL"
+      #     curl -sS -m 10 -o /dev/null -I "$URL" || true
