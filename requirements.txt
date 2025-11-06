@@ -1,18 +1,22 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Pin core numeric stack first (keeps resolver fast & compatible with doctr 0.8.x)
+# Core numeric stack
 numpy==1.26.4
 scipy==1.11.4
 
-# PyTorch CPU wheels (works on App Service Linux)
+# PyTorch CPU wheels (compatible pair)
 torch==2.2.2+cpu
 torchvision==0.17.2+cpu
 
-# Doctr WITHOUT the deprecated [torch] extra (we provide torch/vision above)
+# DocTR (torch backend supplied above)
 python-doctr==0.8.1
-rapidfuzz==3.8.1     # doctr 0.8.x requires >=3,<4
+rapidfuzz==3.8.1
 
-# Your libs (pinned)
+# Image/PDF I/O without system GL/X libs
+opencv-python-headless==4.10.0.84
+pypdfium2==4.30.0   # lets DocTR read PDFs without system deps
+
+# Your libs
 clean-text[gpl]==0.6.0
 libretranslatepy==2.1.4
 natsort==8.4.0
@@ -21,5 +25,5 @@ pyspellchecker==0.8.3
 tqdm==4.67.1
 flask==3.0.3
 
-# Serve Flask in App Service
+# Prod server
 gunicorn==21.2.0
