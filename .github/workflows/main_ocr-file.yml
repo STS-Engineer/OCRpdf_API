@@ -15,7 +15,7 @@ permissions:
 
 env:
   APP_NAME: ocr-file
-  RESOURCE_GROUP: <VOTRE_RESOURCE_GROUP>   # ex: Azure_Poitiers
+  RESOURCE_GROUP: ocr-file_group   # ex: Azure_Poitiers
   PYTHON_VERSION: '3.11'
   ARTIFACT_NAME: python-app
   ZIP_NAME: app.zip
@@ -104,3 +104,4 @@ jobs:
       #     URL="https://${{ env.APP_NAME }}.azurewebsites.net/"
       #     echo "Warming up $URL"
       #     curl -sS -m 10 -o /dev/null -I "$URL" || true
+
