@@ -5,7 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Prevent overlapping runs/deploys
 concurrency:
   group: ocr-file-appservice
   cancel-in-progress: true
@@ -24,33 +23,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Optional sanity check (can remove to speed up)
       - name: Create venv & install deps
         run: |
           python -m venv antenv
           source antenv/bin/activate
           pip install -r requirements.txt
 
-      # Create a clean deployment zip
       - name: Create deployment zip
         run: |
-          # Create a clean deployment directory
-          mkdir -p deployment
-          
-          # Copy only necessary files
-          cp -r *.py requirements.txt deployment/ 2>/dev/null || true
-          cp -r templates deployment/ 2>/dev/null || true
-          cp -r static deployment/ 2>/dev/null || true
-          cp -r app deployment/ 2>/dev/null || true
-          cp -r modules deployment/ 2>/dev/null || true
-          
-          # Create zip from deployment directory
-          cd deployment && zip -r ../app.zip .
-
-      - name: Verify zip contents
-        run: |
-          echo "Zip file structure:"
-          unzip -l app.zip | head -20
+          # Clean zip creation excluding unnecessary files
+          zip -r app.zip . \
+            -x "antenv/**" ".git/**" ".github/**" "**/__pycache__/**" "*.log" "test*" "*.tmp"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -70,44 +53,17 @@ jobs:
           name: python-app
           path: ./dist
 
-      - name: List files (debug)
-        run: ls -la ./dist/
-
-      - name: Verify downloaded artifact
-        run: |
-          echo "Downloaded artifact contents:"
-          unzip -l ./dist/app.zip | head -10
-
-      - name: Stop Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ocr-file
-          slot-name: Production
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
-          action: stop
-
-      - name: Deploy to Azure Web App
+      - name: Deploy to Azure Web App using SCM
         uses: azure/webapps-deploy@v3
         with:
           app-name: ocr-file
           slot-name: Production
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
           package: ./dist/app.zip
+          target: SCM
+          verbose: true
 
-      - name: Start Azure Web App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ocr-file
-          slot-name: Production
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
-          action: start
-
-      - name: Wait for app to be ready
+      - name: Wait for deployment to complete
         run: |
-          echo "Waiting for application to start..."
-          sleep 30
-
-      - name: Check app health
-        run: |
-          echo "Checking application health..."
-          curl -f --retry 3 --retry-delay 10 https://ocr-file.azurewebsites.net/ || echo "Application might be starting up..."
+          sleep 20
+          echo "Deployment should be complete"
