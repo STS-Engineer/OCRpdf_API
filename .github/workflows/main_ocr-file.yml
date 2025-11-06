@@ -33,13 +33,14 @@ jobs:
           pip install -r requirements.txt
                 
       # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
-      - name: Upload artifact for deployment jobs
-        uses: actions/upload-artifact@v4
+      - name: Download artifact
+        uses: actions/download-artifact@v4
         with:
-          name: python-app
-          path: |
-            .
-            !antenv/
+          name: OCRPdf_API          # must MATCH the name used in upload step
+          path: ./dist              # folder where it will be extracted
+
+      - name: List files (debug)
+        run: ls -R ./dist
 
       # 🚫 Opting Out of Oryx Build
       # If you prefer to disable the Oryx build process during deployment, follow these steps:
@@ -57,15 +58,15 @@ jobs:
         with:
           name: python-app
       
-      - name: 'Deploy to Azure Web App'
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
-        id: deploy-to-webapp
         with:
-          app-name: 'ocr-file'
-          slot-name: 'Production'
+          app-name: ocr-file
+          slot-name: Production
 
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
-          package: OCRPdf_API.zip
+          package: ./dist
  
+
 
 
