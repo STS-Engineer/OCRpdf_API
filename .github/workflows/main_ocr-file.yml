@@ -31,11 +31,26 @@ jobs:
           source antenv/bin/activate
           pip install -r requirements.txt
 
-      # Create a deployable zip (exclude venv, git, workflows, caches)
+      # Create a clean deployment zip
       - name: Create deployment zip
         run: |
-          zip -r app.zip . \
-            -x "antenv/**" ".git/**" ".github/**" "**/__pycache__/**"
+          # Create a clean deployment directory
+          mkdir -p deployment
+          
+          # Copy only necessary files
+          cp -r *.py requirements.txt deployment/ 2>/dev/null || true
+          cp -r templates deployment/ 2>/dev/null || true
+          cp -r static deployment/ 2>/dev/null || true
+          cp -r app deployment/ 2>/dev/null || true
+          cp -r modules deployment/ 2>/dev/null || true
+          
+          # Create zip from deployment directory
+          cd deployment && zip -r ../app.zip .
+
+      - name: Verify zip contents
+        run: |
+          echo "Zip file structure:"
+          unzip -l app.zip | head -20
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -56,7 +71,20 @@ jobs:
           path: ./dist
 
       - name: List files (debug)
-        run: ls -R ./dist
+        run: ls -la ./dist/
+
+      - name: Verify downloaded artifact
+        run: |
+          echo "Downloaded artifact contents:"
+          unzip -l ./dist/app.zip | head -10
+
+      - name: Stop Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ocr-file
+          slot-name: Production
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
+          action: stop
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
@@ -65,3 +93,21 @@ jobs:
           slot-name: Production
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
           package: ./dist/app.zip
+
+      - name: Start Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ocr-file
+          slot-name: Production
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
+          action: start
+
+      - name: Wait for app to be ready
+        run: |
+          echo "Waiting for application to start..."
+          sleep 30
+
+      - name: Check app health
+        run: |
+          echo "Checking application health..."
+          curl -f --retry 3 --retry-delay 10 https://ocr-file.azurewebsites.net/ || echo "Application might be starting up..."
