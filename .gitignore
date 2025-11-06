@@ -1,0 +1,30 @@
+# Python venvs
+.venv/
+venv/
+env/
+.myvenv/
+
+# Python junk
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+
+# OS/editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Big data / models (adjust as needed)
+models/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.h5
+*.zip
+*.tar
+*.tar.gz
