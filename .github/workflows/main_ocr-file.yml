@@ -63,4 +63,6 @@ jobs:
         with:
           app-name: 'ocr-file'
           slot-name: 'Production'
+
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5B3B05E747DB4C4FA45647BB9CD008E6 }}
+          package: OCRPdf_API.zip 
