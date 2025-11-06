@@ -19,7 +19,7 @@ jobs:
         with: { fetch-depth: 1 }
 
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
+        with: { python-version: '3.12' }
 
       - name: Validate requirements (optional)
         run: |
@@ -77,3 +77,4 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
           package: ./
         timeout-minutes: 15
+
