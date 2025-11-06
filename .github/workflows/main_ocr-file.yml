@@ -5,10 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# ✅ Empêche les chevauchements sans tuer brutalement un run en cours
 concurrency:
   group: ocr-file-production
-  cancel-in-progress: false
+  cancel-in-progress: false  # ✅ évite les chevauchements générateurs de 409
 
 jobs:
   build:
@@ -17,13 +16,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+        with: { fetch-depth: 1 }
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
 
       - name: Validate requirements (optional)
         run: |
@@ -55,29 +51,29 @@ jobs:
           name: python-app
           path: .
 
-      # ✅ Déploiement avec retry en cas de 409
-      - name: Deploy to Azure Web App (with retry on 409)
-        id: deploy
+      # 🔁 Tentative 1
+      - name: Deploy to Azure Web App (attempt 1)
+        id: deploy1
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'ocr-file'
-          # soit ne rien mettre, soit:
+          slot-name: 'production'              # ou supprime complètement si pas de slot
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
+          package: ./
+        timeout-minutes: 15
+        continue-on-error: true
+
+      - name: Wait 25s before retry (only if failed)
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 25
+
+      # 🔁 Tentative 2 (seulement si la 1 a échoué, p.ex. 409)
+      - name: Deploy to Azure Web App (attempt 2)
+        if: steps.deploy1.outcome == 'failure'
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'ocr-file'
           slot-name: 'production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
           package: ./
-        continue-on-error: true
-
-      - name: Handle 409 and retry
-        if: steps.deploy.outcome == 'failure'
-        run: |
-          echo "First attempt failed, sleeping 25s then retrying once…"
-          sleep 25
-          npx --yes zx <<'ZX'
-          import { $ } from 'zx'
-          try {
-            await $`gh workflow run ${process.env.GITHUB_WORKFLOW} -f rerun_job=deploy`
-          } catch(e) {
-            // Fallback: relancer l'action directement (une 2e tentative)
-            process.exit(1)
-          }
-          ZX
+        timeout-minutes: 15
