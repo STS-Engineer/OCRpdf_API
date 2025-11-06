@@ -5,19 +5,23 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# 🧱 Prevent overlapping deployments to this app/slot
+# 🚦 Serialize deploys (don't kill the one that's building)
 concurrency:
   group: ocr-file-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
-# Least-privilege defaults for all jobs
 permissions:
   contents: read
+
+env:
+  APP_NAME: ocr-file
+  PYTHON_VERSION: '3.11'
+  SITE_PACKAGES: .python_packages/lib/site-packages
+  STARTUP_COMMAND: "gunicorn --bind 0.0.0.0:8000 app:app"  # change for Django/FastAPI
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,38 +31,41 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      # Optional: quick sanity install (catches version conflicts early)
-      - name: Validate requirements (optional)
+      - name: Vendor dependencies into artifact
         run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          # Prefer source builds to catch wheels/compilation surprises early; fall back if needed
-          PIP_NO_BINARY=":none:" pip install -r requirements.txt || pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          mkdir -p $SITE_PACKAGES
+          pip install -r requirements.txt -t $SITE_PACKAGES
+          # Optional: sanity import check
+          python - <<'PY'
+          import pkgutil, sys
+          print("Vendored packages:", len(list(pkgutil.iter_modules([".python_packages/lib/site-packages"]))))
+          PY
 
-      # Package repo (excluding venv, git metadata, logs, caches) into a zip for deploy
-      - name: Create deploy package
+      # Optional: Django collectstatic or DB migrations could go here (build-time only)
+      # - name: Django collectstatic
+      #   run: python manage.py collectstatic --noinput
+
+      - name: Create deploy package (Run-From-Package friendly)
         run: |
-          mkdir -p build
-          zip -r build/app.zip . \
-            -x ".git/**" ".github/**" "**/__pycache__/**" ".venv/**" "antenv/**" "**/*.log"
+          zip -r build.zip . \
+            -x ".git/**" ".github/**" ".venv/**" "**/__pycache__/**" "**/*.pyc" "**/*.log"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: build/app.zip
+          path: build.zip
           if-no-files-found: error
           retention-days: 7
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
-
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -66,43 +73,23 @@ jobs:
           name: python-app
           path: .
 
-      # ⏳ Wait until no deployment is in progress to avoid 409 from Kudu
-      - name: Wait for Kudu to be idle
-        env:
-          APP_NAME: ocr-file
-          PUBLISH_PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq libxml2-utils curl
-          echo "$PUBLISH_PROFILE" > publishProfile.xml
-          USERNAME=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userName)" publishProfile.xml)
-          PASSWORD=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userPWD)" publishProfile.xml)
-          DEPLOY_API="https://${APP_NAME}.scm.azurewebsites.net/api/deployments"
-          echo "Checking Kudu deployment queue for ${APP_NAME}…"
-          ATTEMPTS=0
-          until [ $ATTEMPTS -ge 60 ]; do
-            STATUS_JSON=$(curl -sf --user "$USERNAME:$PASSWORD" "$DEPLOY_API" || echo "[]")
-            # status: 3=pending, 4=building. If none match, we're idle.
-            BUSY=$(echo "$STATUS_JSON" | jq '[ .[] | select(.status == 3 or .status == 4) ] | length')
-            if [ "$BUSY" -eq 0 ]; then
-              echo "Kudu is idle."
-              break
-            fi
-            echo "Kudu busy (pending/building=$BUSY). Retrying in 10s…"
-            sleep 10
-            ATTEMPTS=$((ATTEMPTS+1))
-          done
-          if [ $ATTEMPTS -ge 60 ]; then
-            echo "Timed out waiting for Kudu to be idle." >&2
-            exit 1
-          fi
+      # Ensure app settings to avoid Oryx/Kudu builds and run from zip
+      - name: Set App Service settings (no server builds, run from package, startup command)
+        uses: azure/appservice-settings@v1
+        with:
+          app-name: ${{ env.APP_NAME }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
+          app-settings-json: |
+            [
+              {"name":"SCM_DO_BUILD_DURING_DEPLOYMENT","value":"false"},
+              {"name":"WEBSITE_RUN_FROM_PACKAGE","value":"1"},
+              {"name":"STARTUP_COMMAND","value":"${{ env.STARTUP_COMMAND }}"}
+            ]
 
-      - name: Deploy to Azure Web App
-        id: deploy-to-webapp
+      - name: Deploy ZIP (no Oryx)
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'ocr-file'
+          app-name: ${{ env.APP_NAME }}
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
-          package: app.zip
+          package: build.zip
