@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# 🧱 Prevent overlapping deployments to this app/slot
+concurrency:
+  group: ocr-file-production
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,7 +32,6 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          # Helpful flags; remove if they cause issues
           PIP_NO_BINARY=":none:" pip install -r requirements.txt || pip install -r requirements.txt
 
       - name: Upload artifact
@@ -52,6 +56,39 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
+
+      # ⏳ Wait until no deployment is in progress to avoid 409
+      - name: Wait for Kudu to be idle
+        env:
+          APP_NAME: ocr-file
+          PUBLISH_PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_06D00263B7A6480C8C21DA4DE93B2EE7 }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq libxml2-utils
+          echo "$PUBLISH_PROFILE" > publishProfile.xml
+          USERNAME=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userName)" publishProfile.xml)
+          PASSWORD=$(xmllint --xpath "string(//publishProfile[@publishMethod='MSDeploy']/@userPWD)" publishProfile.xml)
+          DEPLOY_API="https://${APP_NAME}.scm.azurewebsites.net/api/deployments"
+
+          echo "Checking Kudu deployment queue for ${APP_NAME}…"
+          ATTEMPTS=0
+          until [ $ATTEMPTS -ge 60 ]; do
+            STATUS_JSON=$(curl -sf --user "$USERNAME:$PASSWORD" "$DEPLOY_API" || echo "[]")
+            # status: 3=pending, 4=building. If none match, we're idle.
+            BUSY=$(echo "$STATUS_JSON" | jq '[ .[] | select(.status == 3 or .status == 4) ] | length')
+            if [ "$BUSY" -eq 0 ]; then
+              echo "Kudu is idle."
+              break
+            fi
+            echo "Kudu busy (pending/building=$BUSY). Retrying in 10s…"
+            sleep 10
+            ATTEMPTS=$((ATTEMPTS+1))
+          done
+          if [ $ATTEMPTS -ge 60 ]; then
+            echo "Timed out waiting for Kudu to be idle." >&2
+            exit 1
+          fi
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
