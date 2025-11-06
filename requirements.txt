@@ -1,0 +1,10 @@
+clean-text[gpl]
+python-doctr[torch]
+libretranslatepy
+natsort
+nltk
+pyspellchecker
+torch
+tqdm
+rapidfuzz==2.13.7
+flask
