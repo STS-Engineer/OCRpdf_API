@@ -1,5 +1,4 @@
 clean-text[gpl]
-python-doctr[torch]
 libretranslatepy
 natsort
 nltk
@@ -10,5 +9,8 @@ rapidfuzz==2.13.7
 flask
 gunicorn
 huggingface_hub<0.20.0
+# Install opencv-python-headless FIRST
 opencv-python-headless==4.10.0.84
 pypdfium2==4.30.0
+# Install doctr without opencv (it will use the headless version above)
+python-doctr[torch]
