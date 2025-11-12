@@ -25,3 +25,4 @@ python -c "import cv2; print(f'OpenCV version: {cv2.__version__}')" || echo "WAR
 # 5) Run your app
 echo "INFO: Starting Gunicorn server..."
 exec gunicorn -k gthread -w 2 -b 0.0.0.0:8000 app:app
+
