@@ -13,7 +13,11 @@ logging.basicConfig(
     datefmt="%m/%d/%Y %I:%M:%S",
 )
 
+import os
+import sys
 
+# Force opencv to use headless version
+os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
 import os
 import pprint as pp
 import re
