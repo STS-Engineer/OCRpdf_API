@@ -1,5 +1,5 @@
 clean-text[gpl]
-python-doctr[torch]
+python-doctr[torch]==0.7.0
 libretranslatepy
 natsort
 nltk
@@ -10,5 +10,6 @@ rapidfuzz==2.13.7
 flask
 gunicorn
 huggingface_hub<0.20.0
-opencv-python-headless==4.10.0.84
+# OpenCV will be installed separately in startup.sh to ensure headless version
+# opencv-python-headless==4.10.0.84
 pypdfium2==4.30.0
