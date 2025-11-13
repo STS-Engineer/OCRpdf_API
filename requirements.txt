@@ -10,4 +10,3 @@ rapidfuzz==2.13.7
 flask
 gunicorn
 huggingface_hub<0.20.0
-pypdfium2==4.30.0
