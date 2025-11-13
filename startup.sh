@@ -19,6 +19,7 @@ pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless || t
 # 2. Install Python requirements (docTR will pull an OpenCV dependency here)
 echo "INFO: Installing Python requirements (docTR will install an OpenCV version)..."
 pip install --no-cache-dir -r requirements.txt
+# ^ pypdfium2 and opencv-python-headless are NOT in this list, preventing conflict
 
 # 3. Force remove any GUI opencv that might have been installed by docTR's dependencies
 echo "INFO: Removing non-headless OpenCV versions..."
@@ -28,7 +29,7 @@ pip uninstall -y opencv-python opencv-contrib-python || true
 echo "INFO: Installing the pinned opencv-python-headless version..."
 pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
-# Install pypdfium2 (Ensure pypdfium2 is installed if it was removed from requirements.txt, though it is still in the requirements file)
+# Install pypdfium2 (LAST STEP) to ensure it is the correct version
 echo "INFO: Installing pypdfium2..."
 pip install --no-cache-dir pypdfium2==4.30.0
 
