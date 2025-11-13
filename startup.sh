@@ -12,22 +12,30 @@ apt-get update && apt-get install -y \
     libffi-dev \
     shared-mime-info
 
-# Install requirements (let doctr pull its dependencies including opencv)
-echo "INFO: Installing Python requirements..."
+# 1. Clean up any existing OpenCV installations to start fresh
+echo "INFO: Cleaning up any existing OpenCV installations..."
+pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless || true
+
+# 2. Install Python requirements (docTR will pull an OpenCV dependency here)
+echo "INFO: Installing Python requirements (docTR will install an OpenCV version)..."
 pip install --no-cache-dir -r requirements.txt
 
-# Check what OpenCV version was installed and ensure it's working
-echo "INFO: Checking OpenCV installation..."
-python -c "import cv2; print(f'OpenCV version: {cv2.__version__}')" && echo "✓ OpenCV OK" || {
-    echo "✗ OpenCV import failed, trying to fix..."
-    # If OpenCV failed, install the latest headless version that's compatible
-    pip uninstall -y opencv-python opencv-contrib-python || true
-    pip install --force-reinstall opencv-python-headless
-    python -c "import cv2; print(f'OpenCV version after reinstall: {cv2.__version__}')" || echo "✗ OpenCV still failed"
-}
+# 3. Force remove any GUI opencv that might have been installed by docTR's dependencies
+echo "INFO: Removing non-headless OpenCV versions..."
+pip uninstall -y opencv-python opencv-contrib-python || true
 
-# Verify other critical installations
-echo "INFO: Verifying other installations..."
+# 4. Install the required headless version (LAST STEP) to ensure it is the active 'cv2'
+echo "INFO: Installing the pinned opencv-python-headless version..."
+pip install --no-cache-dir opencv-python-headless==4.10.0.84
+
+# Install pypdfium2 (Ensure pypdfium2 is installed if it was removed from requirements.txt, though it is still in the requirements file)
+echo "INFO: Installing pypdfium2..."
+pip install --no-cache-dir pypdfium2==4.30.0
+
+# Verify installation (This check should now pass)
+echo "INFO: Verifying installations..."
+python -c "import sys; print(f'Python: {sys.version}')"
+python -c "import cv2; print(f'OpenCV: {cv2.__version__}')" && echo "✓ OpenCV OK" || echo "✗ OpenCV FAILED"
 python -c "import pypdfium2; print('✓ pypdfium2 OK')" || echo "✗ pypdfium2 FAILED"
 python -c "import flask; print('✓ Flask OK')" || echo "✗ Flask FAILED"
 python -c "import torch; print('✓ PyTorch OK')" || echo "✗ PyTorch FAILED"
@@ -54,7 +62,6 @@ try:
     print('✓ OCR model loaded successfully')
 except Exception as e:
     print(f'✗ OCR model loading failed: {e}', file=sys.stderr)
-    # Don't exit, let the app start anyway - it will handle model loading
 PYEOF
 
 echo "INFO: Starting Gunicorn server..."
