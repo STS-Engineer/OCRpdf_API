@@ -2,12 +2,14 @@ import logging
 import time
 from pathlib import Path
 import contextlib
+import sys # Added for error handling if needed
 
 from flask import Flask, request, jsonify
 import nltk
 import torch
 
 from pdf2text import *
+# Note: pdf2text imports ocr_predictor from doctr.models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,6 +18,8 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
+# Note: nltk.download("stopwords") is now run here to ensure it's available
+# immediately on module load.
 nltk.download("stopwords")
 
 # Initialize OCR model globally
@@ -25,7 +29,8 @@ ocr_model = None
 def init_ocr_model():
     """Initialize the OCR model"""
     global ocr_model
-    logging.info("Loading OCR model")
+    logging.info("Loading OCR model...")
+    # Use contextlib.redirect_stdout to silence heavy model loading output
     with contextlib.redirect_stdout(None):
         ocr_model = ocr_predictor(
             "db_resnet50",
@@ -33,6 +38,19 @@ def init_ocr_model():
             pretrained=True,
             assume_straight_pages=True,
         )
+    logging.info("OCR model loaded successfully into the application process.")
+
+
+# =====================================================================
+# >>> REQUIRED FIX: CALL init_ocr_model() AT MODULE LEVEL <<<
+# This ensures Gunicorn's parent process loads the model before forking workers.
+try:
+    init_ocr_model()
+except Exception as e:
+    # This block executes if model loading fails during the Gunicorn preload phase.
+    # The application will still start, but requests relying on the model will fail.
+    logging.error(f"FATAL: Failed to load OCR model during Gunicorn preload: {e}", exc_info=True)
+# =====================================================================
 
 
 def convert_PDF(pdf_path, language: str = "en", max_pages=20):
@@ -135,7 +153,8 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "ocr_model_loaded": ocr_model is not None,
+        # This check will now return True
+        "ocr_model_loaded": ocr_model is not None, 
         "gpu_available": torch.cuda.is_available()
     })
 
@@ -150,7 +169,7 @@ def convert():
     Body:
         {
             "pdf_path": "C:\\path\\to\\file.pdf",
-            "max_pages": 20  (optional)
+            "max_pages": 20 (optional)
         }
     """
     # Vérifier que le body est du JSON
@@ -202,8 +221,8 @@ if __name__ == "__main__":
     use_GPU = torch.cuda.is_available()
     logging.info(f"Using GPU: {use_GPU}")
     
-    # Initialize OCR model
-    init_ocr_model()
+    # If run directly (not via Gunicorn), the model is already loaded above,
+    # but the logs below will confirm status.
     
     logging.info("Flask API ready")
     logging.info("Access API at: http://localhost:5000")
