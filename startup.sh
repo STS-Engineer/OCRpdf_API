@@ -10,23 +10,25 @@ apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libgdk-pixbuf2.0-0 \
     libffi-dev \
-    shared-mime-info
+    shared-mime-info \
+    python3-opencv  # Add system OpenCV package as backup
 
 # Install pinned requirements
 echo "INFO: Installing Python requirements..."
 pip install --no-cache-dir -r requirements.txt
 
-# Ensure GUI OpenCV is removed (docTR may have pulled it back in)
-echo "INFO: Removing any non-headless OpenCV installations..."
+# Reinstall OpenCV headless explicitly with dependencies
+echo "INFO: Reinstalling OpenCV headless..."
 pip uninstall -y opencv-python opencv-contrib-python || true
+pip install --no-cache-dir --force-reinstall opencv-python-headless==4.10.0.84
 
-# Install headless OpenCV + a PDF renderer for DocTR
-echo "INFO: Installing opencv-python-headless and pypdfium2..."
-pip install --no-cache-dir opencv-python-headless==4.10.0.84 pypdfium2==4.30.0
+# Install pypdfium2 separately
+echo "INFO: Installing pypdfium2..."
+pip install --no-cache-dir pypdfium2==4.30.0
 
 # Verify installation
 echo "INFO: Verifying OpenCV installation..."
-python -c "import cv2; print(f'OpenCV version: {cv2.__version__}')" || echo "WARNING: OpenCV import failed"
+python -c "import cv2; print(f'OpenCV version: {cv2.__version__}')"
 
 # Pre-download NLTK data
 echo "INFO: Downloading NLTK stopwords data..."
