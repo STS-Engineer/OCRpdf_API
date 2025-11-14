@@ -10,3 +10,4 @@ rapidfuzz==2.13.7
 flask
 gunicorn
 huggingface_hub<0.20.0
+requests
