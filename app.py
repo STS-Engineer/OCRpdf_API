@@ -3,7 +3,9 @@ import time
 from pathlib import Path
 import contextlib
 import os
-from werkzeug.utils import secure_filename # Used for safe filename handling
+
+import requests  # <-- for downloading from download_link
+from werkzeug.utils import secure_filename  # Used for safe filename handling
 
 from flask import Flask, request, jsonify
 import nltk
@@ -11,7 +13,9 @@ import torch
 
 # Assuming pdf2text.py is in the same directory and contains
 # rm_local_text_files, convert_PDF_to_Text, and ocr_predictor
-from pdf2text import * # --- CONFIGURATION ---
+from pdf2text import *
+
+# --- CONFIGURATION ---
 # Use /tmp for transient storage, which is standard practice on Azure App Services
 UPLOAD_FOLDER = Path('/tmp/uploads')
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'}
@@ -37,6 +41,7 @@ nltk.download("stopwords")
 # Initialize OCR model globally
 ocr_model = None
 
+
 def init_ocr_model():
     """Initialize the OCR model"""
     global ocr_model
@@ -49,6 +54,7 @@ def init_ocr_model():
             assume_straight_pages=True,
         )
     logging.info("OCR model loaded successfully into the application process.")
+
 
 # Pre-load model at module level for Gunicorn
 try:
@@ -80,7 +86,7 @@ def convert_PDF(filename: str, max_pages=20):
     if not file_path.exists():
         logging.error(f"File {file_path} does not exist")
         # Raise an error that can be caught by the endpoint
-        raise FileNotFoundError(f"File '{filename}' not found on server. Did you call /upload first?")
+        raise FileNotFoundError(f"File '{filename}' not found on server. Did you call /upload or /api/upload-file first?")
     
     try:
         conversion_stats = convert_PDF_to_Text(
@@ -122,11 +128,15 @@ def index():
         "endpoints": {
             "/upload": {
                 "method": "POST",
-                "description": "Step 1: Uploads file to server, returns filename for /convert",
+                "description": "Step 1 (multipart): Uploads file to server, returns filename for /convert",
+            },
+            "/api/upload-file": {
+                "method": "POST",
+                "description": "Step 1 (OpenAI JSON): Accepts openaiFileIdRefs, downloads file, saves it locally, returns filename for /convert",
             },
             "/convert": {
                 "method": "POST",
-                "description": "Step 2: Converts the file saved by /upload, returns text, and deletes the file.",
+                "description": "Step 2: Converts the file saved by /upload or /api/upload-file, returns text, and deletes the file.",
             },
             "/health": {
                 "method": "GET",
@@ -134,6 +144,7 @@ def index():
             }
         }
     })
+
 
 @app.route('/health')
 def health():
@@ -146,8 +157,9 @@ def health():
         "upload_folder_exists": UPLOAD_FOLDER.exists()
     })
 
+
 # ----------------------------------------------------------------------
-# >>> STEP 1: UPLOAD ROUTE (Saves file, returns filename) <<<
+# >>> STEP 1A: UPLOAD ROUTE (Saves file from multipart/form-data) <<<
 # ----------------------------------------------------------------------
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -199,12 +211,106 @@ def upload_file():
 
 
 # ----------------------------------------------------------------------
+# >>> STEP 1B: OPENAI JSON ROUTE (openaiFileIdRefs -> local file) <<<
+# ----------------------------------------------------------------------
+@app.route('/api/upload-file', methods=['POST'])
+def upload_file_from_openai():
+    """
+    Handles JSON payloads from the OpenAI Assistant that contain openaiFileIdRefs.
+    
+    Flow:
+    - Reads openaiFileIdRefs from JSON
+    - Downloads the file from the temporary link
+    - Validates extension
+    - Saves it into UPLOAD_FOLDER (transient local storage)
+    - Returns the filename so /convert can process it
+    """
+    data = request.get_json(silent=True) or {}
+    refs = data.get('openaiFileIdRefs', [])
+
+    if not refs:
+        return jsonify({
+            "success": False,
+            "error": "No openaiFileIdRefs in JSON request",
+            "received_content_type": request.content_type
+        }), 400
+
+    # Original openaiFileIdRefs logic
+    first = refs[0]
+    if isinstance(first, dict):
+        download_link = first.get('download_link')
+        original_name = first.get('name') or 'uploaded_file'
+    else:
+        download_link = first
+        original_name = 'uploaded_file'
+
+    if not download_link:
+        return jsonify({
+            "success": False,
+            "error": "Missing download_link in openaiFileIdRefs"
+        }), 400
+
+    try:
+        # 1. Download the file from the temporary link
+        app.logger.info(f"Downloading file from: {download_link}")
+        r = requests.get(download_link, stream=False, timeout=10)
+        r.raise_for_status()
+        file_content_bytes = r.content
+
+        # 2. Validate and sanitize filename
+        filename_safe = secure_filename(original_name) or "uploaded_file"
+        if '.' not in filename_safe:
+            return jsonify({
+                "success": False,
+                "error": "Uploaded file has no extension; cannot determine type"
+            }), 400
+
+        if not allowed_file(filename_safe):
+            return jsonify({
+                "success": False,
+                "error": f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
+            }), 400
+
+        # Extract extension and make filename unique
+        base_name, ext = filename_safe.rsplit('.', 1)
+        ext = ext.lower()
+        unique_filename = f"{base_name}_{int(time.time())}.{ext}"
+        file_path = UPLOAD_FOLDER / unique_filename
+
+        # 3. Save the downloaded file to disk (transient)
+        with open(file_path, "wb") as f:
+            f.write(file_content_bytes)
+
+        app.logger.info(f"File downloaded from OpenAI and saved to: {file_path}")
+
+        # 4. Return filename (to be used as pdf_path in /convert)
+        return jsonify({
+            "success": True,
+            "message": "File downloaded and saved successfully from openaiFileIdRefs.",
+            "filename": unique_filename
+        }), 200
+
+    except requests.RequestException as e:
+        app.logger.error(f"Request failed (download): {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": f"Failed to download file from temporary link: {str(e)}"
+        }), 502
+    except Exception as e:
+        app.logger.error(f"General error in /api/upload-file: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": f"Server error during OpenAI-style upload: {str(e)}"
+        }), 500
+
+
+# ----------------------------------------------------------------------
 # >>> STEP 2: CONVERT ROUTE (Processes file, deletes file) <<<
 # ----------------------------------------------------------------------
 @app.route('/convert', methods=['POST'])
 def convert_file_from_upload():
     """
-    Handle PDF conversion by file path (the filename from the /upload step).
+    Handle PDF conversion by file path (the filename from the /upload or /api/upload-file step).
     """
     if not request.is_json:
         return jsonify({
@@ -214,13 +320,13 @@ def convert_file_from_upload():
     
     data = request.get_json()
     
-    # pdf_path is now the filename returned from /upload
+    # pdf_path is now the filename returned from /upload or /api/upload-file
     filename = data.get('pdf_path') 
     
     if not filename or filename.strip() == '':
         return jsonify({
             "success": False, 
-            "error": "Missing 'pdf_path' (filename from /upload) parameter in JSON body"
+            "error": "Missing 'pdf_path' (filename from /upload or /api/upload-file) parameter in JSON body"
         }), 400
     
     file_to_delete = UPLOAD_FOLDER / filename
@@ -253,7 +359,7 @@ def convert_file_from_upload():
             "error": f"Server error: {str(e)}"
         }), 500
     finally:
-        # CRITICAL: Clean up the file after processing
+        # CRITICAL: Clean up the file after processing (no long-term storage)
         if file_to_delete.exists():
             try:
                 os.remove(file_to_delete)
