@@ -2,14 +2,14 @@ import logging
 import time
 from pathlib import Path
 import contextlib
-import sys # Added for error handling if needed
+import os
+from werkzeug.utils import secure_filename
 
 from flask import Flask, request, jsonify
 import nltk
 import torch
 
 from pdf2text import *
-# Note: pdf2text imports ocr_predictor from doctr.models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,8 +18,13 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# Note: nltk.download("stopwords") is now run here to ensure it's available
-# immediately on module load.
+# Configure upload settings - Azure-friendly path
+UPLOAD_FOLDER = Path('/home/site/wwwroot/uploads')
+UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+
 nltk.download("stopwords")
 
 # Initialize OCR model globally
@@ -30,7 +35,6 @@ def init_ocr_model():
     """Initialize the OCR model"""
     global ocr_model
     logging.info("Loading OCR model...")
-    # Use contextlib.redirect_stdout to silence heavy model loading output
     with contextlib.redirect_stdout(None):
         ocr_model = ocr_predictor(
             "db_resnet50",
@@ -41,29 +45,20 @@ def init_ocr_model():
     logging.info("OCR model loaded successfully into the application process.")
 
 
-# =====================================================================
-# >>> REQUIRED FIX: CALL init_ocr_model() AT MODULE LEVEL <<<
-# This ensures Gunicorn's parent process loads the model before forking workers.
 try:
     init_ocr_model()
 except Exception as e:
-    # This block executes if model loading fails during the Gunicorn preload phase.
-    # The application will still start, but requests relying on the model will fail.
     logging.error(f"FATAL: Failed to load OCR model during Gunicorn preload: {e}", exc_info=True)
-# =====================================================================
+
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def convert_PDF(pdf_path, language: str = "en", max_pages=20):
     """
-    convert_PDF - convert a PDF file to text
-
-    Args:
-        pdf_path (str): Path to PDF file
-        language (str, optional): Language to use for OCR. Defaults to "en".
-        max_pages (int): Maximum number of pages to process
-
-    Returns:
-        dict: Conversion results
+    Convert PDF/image file to text using OCR
     """
     rm_local_text_files()
     global ocr_model
@@ -71,7 +66,6 @@ def convert_PDF(pdf_path, language: str = "en", max_pages=20):
     st = time.perf_counter()
     file_path = Path(pdf_path)
     
-    # Vérifier si le fichier existe
     if not file_path.exists():
         logging.error(f"File {file_path} does not exist")
         return {
@@ -126,18 +120,23 @@ def index():
     """API info endpoint"""
     return jsonify({
         "message": "PDF OCR API",
-        "version": "2.0",
+        "version": "3.0",
         "endpoints": {
+            "/upload": {
+                "method": "POST",
+                "description": "Upload and convert PDF/image to text",
+                "parameters": {
+                    "file": "PDF or image file (required, form-data)",
+                    "max_pages": "Maximum pages to process (optional, default: 20)"
+                },
+                "example": "Use multipart/form-data with 'file' field"
+            },
             "/convert": {
                 "method": "POST",
-                "description": "Convert PDF to text by providing file path",
+                "description": "Convert PDF to text by providing file path (server-side files only)",
                 "parameters": {
                     "pdf_path": "Full path to PDF file (required, JSON body)",
                     "max_pages": "Maximum pages to process (optional, default: 20)"
-                },
-                "example": {
-                    "pdf_path": "C:\\Users\\username\\Desktop\\document.pdf",
-                    "max_pages": 20
                 }
             },
             "/health": {
@@ -153,26 +152,92 @@ def health():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        # This check will now return True
         "ocr_model_loaded": ocr_model is not None, 
-        "gpu_available": torch.cuda.is_available()
+        "gpu_available": torch.cuda.is_available(),
+        "upload_folder": str(UPLOAD_FOLDER),
+        "upload_folder_exists": UPLOAD_FOLDER.exists()
     })
+
+
+@app.route('/upload', methods=['POST'])
+def upload_and_convert():
+    """
+    Upload PDF/image file and convert to text
+    
+    POST /upload
+    Content-Type: multipart/form-data
+    Form data:
+        - file: PDF or image file (required)
+        - max_pages: Maximum pages to process (optional, default: 20)
+    """
+    # Check if file is in request
+    if 'file' not in request.files:
+        return jsonify({
+            "success": False,
+            "error": "No file provided. Please upload a file using 'file' field in form-data"
+        }), 400
+    
+    file = request.files['file']
+    
+    # Check if file is selected
+    if file.filename == '':
+        return jsonify({
+            "success": False,
+            "error": "No file selected"
+        }), 400
+    
+    # Check file extension
+    if not allowed_file(file.filename):
+        return jsonify({
+            "success": False,
+            "error": f"Invalid file type. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
+        }), 400
+    
+    try:
+        # Secure the filename and save
+        filename = secure_filename(file.filename)
+        filepath = UPLOAD_FOLDER / filename
+        
+        # Save uploaded file
+        file.save(str(filepath))
+        logging.info(f"File saved to: {filepath}")
+        
+        # Get max_pages parameter
+        max_pages = int(request.form.get('max_pages', 20))
+        
+        # Convert the file
+        result = convert_PDF(str(filepath), max_pages=max_pages)
+        
+        # Add upload info to result
+        result['uploaded_filename'] = filename
+        result['saved_path'] = str(filepath)
+        
+        # Optional: Clean up file after processing
+        # os.remove(filepath)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logging.error(f"Error in upload endpoint: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Server error: {str(e)}"
+        }), 500
 
 
 @app.route('/convert', methods=['POST'])
 def convert():
     """
-    Handle PDF conversion by file path
+    Handle PDF conversion by file path (for files already on server)
     
     POST /convert
     Content-Type: application/json
     Body:
         {
-            "pdf_path": "C:\\path\\to\\file.pdf",
+            "pdf_path": "/path/to/file.pdf",
             "max_pages": 20 (optional)
         }
     """
-    # Vérifier que le body est du JSON
     if not request.is_json:
         return jsonify({
             "success": False, 
@@ -181,7 +246,6 @@ def convert():
     
     data = request.get_json()
     
-    # Vérifier que pdf_path est fourni
     if 'pdf_path' not in data:
         return jsonify({
             "success": False, 
@@ -197,9 +261,7 @@ def convert():
         }), 400
     
     try:
-        # Get max_pages parameter (default: 20)
         max_pages = int(data.get('max_pages', 20))
-        
         logging.info(f"Converting PDF: {pdf_path}")
         
         # Convert PDF
@@ -220,9 +282,7 @@ if __name__ == "__main__":
     
     use_GPU = torch.cuda.is_available()
     logging.info(f"Using GPU: {use_GPU}")
-    
-    # If run directly (not via Gunicorn), the model is already loaded above,
-    # but the logs below will confirm status.
+    logging.info(f"Upload folder: {UPLOAD_FOLDER}")
     
     logging.info("Flask API ready")
     logging.info("Access API at: http://localhost:5000")
