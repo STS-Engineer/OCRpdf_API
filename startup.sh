@@ -30,8 +30,9 @@ echo "INFO: Installing the pinned opencv-python-headless version..."
 pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
 # Install pypdfium2 (LAST STEP) to ensure it is the correct version
+# FIX: Updated version from 4.30.0 to 4.40.0 to resolve 'PdfDocument object does not support the context manager protocol' TypeError.
 echo "INFO: Installing pypdfium2..."
-pip install --no-cache-dir pypdfium2==4.30.0
+pip install --no-cache-dir pypdfium2==4.40.0
 
 # Verify installation (This check should now pass)
 echo "INFO: Verifying installations..."
