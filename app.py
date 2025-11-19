@@ -374,40 +374,54 @@ def convert_file_from_upload():
 
 @app.route('/process-base64', methods=['POST'])
 def process_base64():
-    # 1. VALIDATION: Ensure JSON content
+    # 1. VALIDATION: Check for JSON
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
     
     data = request.get_json()
-    base64_string = data.get('file_base64')
     
-    if not base64_string:
-        return jsonify({"success": False, "error": "Missing 'file_base64' string"}), 400
+    # 2. EXTRACTION: Get your specific keys
+    input_filename = data.get('file_name')             # e.g., "Valeo.csv" (or .pdf)
+    base64_string = data.get('file_content_base64')    # The data string
+    
+    if not input_filename or not base64_string:
+        return jsonify({
+            "success": False, 
+            "error": "Missing 'file_name' or 'file_content_base64' in payload"
+        }), 400
 
-    # 2. SETUP: Create a unique temporary filename
-    # We use UUID so multiple people can hit this route at once without errors
-    unique_filename = f"{uuid.uuid4()}.pdf"
+    # 3. FILENAME SETUP
+    # Extract the extension (e.g., .pdf, .png) from the user's filename
+    _, ext = os.path.splitext(input_filename)
+    
+    # Create a unique name to avoid collisions: "uuid_Valeo.pdf"
+    # We use secure_filename to remove spaces/slashes from the user input
+    safe_name = secure_filename(input_filename)
+    unique_filename = f"{uuid.uuid4()}_{safe_name}"
+    
     temp_file_path = UPLOAD_FOLDER / unique_filename
 
+    # Optional: Check if extension is allowed (based on your global ALLOWED_EXTENSIONS)
+    # if ext.lower().replace('.', '') not in ALLOWED_EXTENSIONS:
+    #     return jsonify({"success": False, "error": "File type not allowed"}), 400
+
     try:
-        # 3. DECODE: Convert Base64 string -> Bytes -> Temp File
-        # Remove header if present (e.g. "data:application/pdf;base64,")
+        # 4. DECODE & SAVE
         if "," in base64_string:
             base64_string = base64_string.split(",", 1)[1]
 
         file_content = base64.b64decode(base64_string)
         
-        # Save bytes to disk momentarily so your OCR library can read it
         with open(temp_file_path, "wb") as f:
             f.write(file_content)
         
-        logging.info(f"Temp file created for processing: {unique_filename}")
+        logging.info(f"Temp file saved: {unique_filename}")
 
-        # 4. PROCESS: Call your existing logic
-        # Your convert_PDF function expects the filename inside UPLOAD_FOLDER
+        # 5. PROCESS (OCR)
+        # Note: If you send a .csv, ensure convert_PDF can handle it. 
+        # Usually this function expects .pdf or images.
         max_pages = int(data.get('max_pages', 20))
         
-        # This calls your existing function!
         result = convert_PDF(unique_filename, max_pages=max_pages)
         
         return jsonify(result)
@@ -419,14 +433,13 @@ def process_base64():
         return jsonify({"success": False, "error": str(e)}), 500
         
     finally:
-        # 5. CLEANUP: Delete the file immediately after OCR is done (or if it fails)
+        # 6. CLEANUP
         if temp_file_path.exists():
             try:
                 os.remove(temp_file_path)
-                logging.info(f"Deleted temp file: {unique_filename}")
+                logging.info(f"Cleaned up: {unique_filename}")
             except Exception as e:
                 logging.warning(f"Failed to delete temp file: {e}")
-
 
 
 
