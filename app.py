@@ -10,7 +10,9 @@ from werkzeug.utils import secure_filename  # Used for safe filename handling
 from flask import Flask, request, jsonify
 import nltk
 import torch
-
+import base64
+import uuid
+import binascii
 # Assuming pdf2text.py is in the same directory and contains
 # rm_local_text_files, convert_PDF_to_Text, and ocr_predictor
 from pdf2text import *
@@ -366,6 +368,68 @@ def convert_file_from_upload():
                 logging.info(f"Cleaned up processed file: {file_to_delete}")
             except Exception as e:
                 logging.warning(f"Failed to remove processed file: {e}")
+
+
+
+
+@app.route('/process-base64', methods=['POST'])
+def process_base64():
+    # 1. VALIDATION: Ensure JSON content
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
+    
+    data = request.get_json()
+    base64_string = data.get('file_base64')
+    
+    if not base64_string:
+        return jsonify({"success": False, "error": "Missing 'file_base64' string"}), 400
+
+    # 2. SETUP: Create a unique temporary filename
+    # We use UUID so multiple people can hit this route at once without errors
+    unique_filename = f"{uuid.uuid4()}.pdf"
+    temp_file_path = UPLOAD_FOLDER / unique_filename
+
+    try:
+        # 3. DECODE: Convert Base64 string -> Bytes -> Temp File
+        # Remove header if present (e.g. "data:application/pdf;base64,")
+        if "," in base64_string:
+            base64_string = base64_string.split(",", 1)[1]
+
+        file_content = base64.b64decode(base64_string)
+        
+        # Save bytes to disk momentarily so your OCR library can read it
+        with open(temp_file_path, "wb") as f:
+            f.write(file_content)
+        
+        logging.info(f"Temp file created for processing: {unique_filename}")
+
+        # 4. PROCESS: Call your existing logic
+        # Your convert_PDF function expects the filename inside UPLOAD_FOLDER
+        max_pages = int(data.get('max_pages', 20))
+        
+        # This calls your existing function!
+        result = convert_PDF(unique_filename, max_pages=max_pages)
+        
+        return jsonify(result)
+
+    except (binascii.Error, ValueError):
+        return jsonify({"success": False, "error": "Invalid Base64 string"}), 400
+    except Exception as e:
+        logging.error(f"Error in base64 processing: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+        
+    finally:
+        # 5. CLEANUP: Delete the file immediately after OCR is done (or if it fails)
+        if temp_file_path.exists():
+            try:
+                os.remove(temp_file_path)
+                logging.info(f"Deleted temp file: {unique_filename}")
+            except Exception as e:
+                logging.warning(f"Failed to delete temp file: {e}")
+
+
+
+
 
 
 if __name__ == "__main__":
