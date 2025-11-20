@@ -53,7 +53,7 @@ def init_ocr_model():
             "db_resnet50",
             "crnn_mobilenet_v3_large",
             pretrained=True,
-            assume_straight_pages=True,
+            assume_straight_pages=False,
         )
     logging.info("OCR model loaded successfully into the application process.")
 
