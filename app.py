@@ -16,6 +16,10 @@ import binascii
 # Assuming pdf2text.py is in the same directory and contains
 # rm_local_text_files, convert_PDF_to_Text, and ocr_predictor
 from pdf2text import *
+from pdf2image import convert_from_path
+import io
+from PIL import Image
+
 
 # --- CONFIGURATION ---
 # Use /tmp for transient storage, which is standard practice on Azure App Services
@@ -441,7 +445,96 @@ def process_base64():
             except Exception as e:
                 logging.warning(f"Failed to delete temp file: {e}")
 
+def convert_PDF_to_JPG_base64(filename: str, dpi=300):
+    """
+    Convert ALL pages from a PDF into Base64-encoded JPG images.
+    No truncation. No page limits.
+    """
 
+    pdf_path = UPLOAD_FOLDER / filename
+
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"File '{filename}' not found in upload directory")
+
+    try:
+        # Load all PDF pages (no max_pages)
+        pages = convert_from_path(pdf_path, dpi=dpi)
+
+        images_b64 = []
+
+        for i, page in enumerate(pages):
+            buffer = io.BytesIO()
+            page.save(buffer, format="JPEG")
+            buffer.seek(0)
+
+            img_bytes = buffer.read()
+            b64_str = base64.b64encode(img_bytes).decode("utf-8")
+
+            images_b64.append({
+                "page": i + 1,
+                "data": f"data:image/jpeg;base64,{b64_str}"
+            })
+
+        return {
+            "success": True,
+            "num_pages": len(images_b64),
+            "images": images_b64,
+            "filename": filename
+        }
+
+    except Exception as e:
+        raise RuntimeError(f"PDF-to-JPG conversion failed: {str(e)}")
+@app.route('/convert-jpg', methods=['POST'])
+def convert_file_to_jpg_base64():
+    """
+    Convert an uploaded PDF (via /upload or /api/upload-file)
+    to JPG Base64 images WITHOUT ANY TRUNCATION.
+    """
+
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": "Content-Type must be application/json"
+        }), 400
+
+    data = request.get_json()
+    filename = data.get("pdf_path")
+
+    if not filename or filename.strip() == "":
+        return jsonify({
+            "success": False,
+            "error": "Missing 'pdf_path'"
+        }), 400
+
+    dpi = int(data.get("dpi", 300))  # adjustable resolution
+
+    pdf_path = UPLOAD_FOLDER / filename
+
+    try:
+        result = convert_PDF_to_JPG_base64(filename, dpi=dpi)
+        return jsonify(result), 200
+
+    except FileNotFoundError as e:
+        return jsonify({"success": False, "error": str(e)}), 404
+
+    except RuntimeError as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    except Exception as e:
+        logging.error(f"Error in convert-jpg endpoint: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Server error: {str(e)}"
+        }), 500
+
+    finally:
+        # SAME CLEANUP BEHAVIOR AS /convert
+        if pdf_path.exists():
+            try:
+                os.remove(pdf_path)
+                logging.info(f"Cleaned up processed file: {pdf_path}")
+            except Exception:
+                pass
 
 
 
