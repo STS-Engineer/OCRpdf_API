@@ -10,7 +10,18 @@ apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libgdk-pixbuf2.0-0 \
     libffi-dev \
-    shared-mime-info
+    shared-mime-info \
+    poppler-utils \
+    poppler-data
+
+# Optional: verify poppler installed
+echo "INFO: Verifying poppler installation..."
+if command -v pdfinfo >/dev/null 2>&1; then
+    pdfinfo -v || true
+    echo "✓ Poppler (pdfinfo) available"
+else
+    echo "⚠ WARNING: pdfinfo not found in PATH"
+fi
 
 # 1. Clean up any existing OpenCV installations to start fresh
 echo "INFO: Cleaning up any existing OpenCV installations..."
@@ -29,7 +40,7 @@ pip uninstall -y opencv-python opencv-contrib-python || true
 echo "INFO: Installing the pinned opencv-python-headless version..."
 pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
-# Install pypdfium2 (LAST STEP) to ensure it is the correct version
+# 5. Install pypdfium2 (LAST STEP) to ensure it is the correct version
 # FIX: Removing version pin to allow installation of the latest version compatible with doctr.
 echo "INFO: Installing pypdfium2..."
 pip install --no-cache-dir pypdfium2
@@ -56,9 +67,9 @@ try:
     print('Loading OCR model...')
     with contextlib.redirect_stdout(None):
         model = ocr_predictor(
-            'db_resnet50', 
-            'crnn_mobilenet_v3_large', 
-            pretrained=True, 
+            'db_resnet50',
+            'crnn_mobilenet_v3_large',
+            pretrained=True,
             assume_straight_pages=True
         )
     print('✓ OCR model loaded successfully')
