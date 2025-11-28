@@ -12,3 +12,6 @@ gunicorn
 huggingface_hub<0.20.0
 requests
 werkzeug
+pdf2image
+Pillow
+
