@@ -3,18 +3,19 @@ import time
 from pathlib import Path
 import contextlib
 import os
+from datetime import datetime, timedelta
+import uuid
+import binascii
 
-import requests  # <-- for downloading from download_link
-from werkzeug.utils import secure_filename  # Used for safe filename handling
+import requests
+from werkzeug.utils import secure_filename
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import nltk
 import torch
 import base64
-import uuid
-import binascii
-# Assuming pdf2text.py is in the same directory and contains
-# rm_local_text_files, convert_PDF_to_Text, and ocr_predictor
+
+# Assuming pdf2text.py is in the same directory
 from pdf2text import *
 from pdf2image import convert_from_path
 import io
@@ -22,8 +23,8 @@ from PIL import Image
 
 
 # --- CONFIGURATION ---
-# Use /tmp for transient storage, which is standard practice on Azure App Services
 UPLOAD_FOLDER = Path('/tmp/uploads')
+OUTPUT_FOLDER = Path('/tmp/output_images')  # Store converted images here
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'}
 
 logging.basicConfig(
@@ -33,12 +34,12 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# Ensure the upload directory exists when the app starts
-# This is safe and idempotent (exist_ok=True)
+# Ensure directories exist
 UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
+OUTPUT_FOLDER.mkdir(exist_ok=True, parents=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-# Set max file size to 50MB
+app.config['OUTPUT_FOLDER'] = OUTPUT_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # Initialize NLTK data
@@ -74,24 +75,37 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-# --- REFACTORED CONVERSION CORE ---
+def cleanup_old_files(folder, max_age_hours=24):
+    """Remove files older than max_age_hours from folder"""
+    try:
+        cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
+        for file_path in folder.iterdir():
+            if file_path.is_file():
+                file_time = datetime.fromtimestamp(file_path.stat().st_mtime)
+                if file_time < cutoff_time:
+                    os.remove(file_path)
+                    logging.info(f"Cleaned up old file: {file_path}")
+    except Exception as e:
+        logging.warning(f"Cleanup failed: {e}")
+
+
+# --- REFACTORED CONVERSION CORE (OCR) ---
 def convert_PDF(filename: str, max_pages=20):
     """
-    Core function to convert a file located in UPLOAD_FOLDER to text.
+    Core function to convert a file located in UPLOAD_FOLDER to text using OCR.
     
     Args:
         filename (str): The name of the file saved in the UPLOAD_FOLDER.
+        max_pages (int): Maximum number of pages to process.
     """
     rm_local_text_files()
     global ocr_model
     
     st = time.perf_counter()
-    # Construct the full path using the UPLOAD_FOLDER base
     file_path = UPLOAD_FOLDER / filename
     
     if not file_path.exists():
         logging.error(f"File {file_path} does not exist")
-        # Raise an error that can be caught by the endpoint
         raise FileNotFoundError(f"File '{filename}' not found on server. Did you call /upload or /api/upload-file first?")
     
     try:
@@ -120,7 +134,6 @@ def convert_PDF(filename: str, max_pages=20):
         
     except Exception as e:
         logging.error(f"Error converting file: {e}")
-        # Raise RuntimeError to be caught by the endpoint for a 500 status
         raise RuntimeError(f"OCR processing failed: {str(e)}")
 
 
@@ -129,20 +142,36 @@ def convert_PDF(filename: str, max_pages=20):
 def index():
     """API info endpoint"""
     return jsonify({
-        "message": "PDF OCR API (Two-Step File Processor)",
-        "version": "4.0",
+        "message": "PDF OCR API with Image URL Support",
+        "version": "5.0",
         "endpoints": {
             "/upload": {
                 "method": "POST",
-                "description": "Step 1 (multipart): Uploads file to server, returns filename for /convert",
+                "description": "Step 1: Upload file, returns filename",
             },
             "/api/upload-file": {
                 "method": "POST",
-                "description": "Step 1 (OpenAI JSON): Accepts openaiFileIdRefs, downloads file, saves it locally, returns filename for /convert",
+                "description": "Step 1 (OpenAI): Accepts openaiFileIdRefs, returns filename",
             },
             "/convert": {
                 "method": "POST",
-                "description": "Step 2: Converts the file saved by /upload or /api/upload-file, returns text, and deletes the file.",
+                "description": "Step 2: OCR conversion to text",
+            },
+            "/convert-to-images": {
+                "method": "POST",
+                "description": "Step 2 (New): Convert PDF to image URLs for GPT",
+            },
+            "/images/<filename>": {
+                "method": "GET",
+                "description": "Serve converted images to GPT Assistant",
+            },
+            "/process-base64": {
+                "method": "POST",
+                "description": "Process base64 encoded files",
+            },
+            "/cleanup": {
+                "method": "POST",
+                "description": "Manually trigger file cleanup",
             },
             "/health": {
                 "method": "GET",
@@ -160,7 +189,9 @@ def health():
         "ocr_model_loaded": ocr_model is not None,  
         "gpu_available": torch.cuda.is_available(),
         "upload_folder": str(UPLOAD_FOLDER),
-        "upload_folder_exists": UPLOAD_FOLDER.exists()
+        "output_folder": str(OUTPUT_FOLDER),
+        "upload_folder_exists": UPLOAD_FOLDER.exists(),
+        "output_folder_exists": OUTPUT_FOLDER.exists()
     })
 
 
@@ -194,18 +225,17 @@ def upload_file():
     
     try:
         filename = secure_filename(file.filename)
-        filepath = UPLOAD_FOLDER / filename
+        base_name, ext = filename.rsplit('.', 1)
+        unique_filename = f"{base_name}_{int(time.time())}.{ext}"
         
-        # Save uploaded file
-        # Using str(filepath) is necessary for older Python versions/libraries
+        filepath = UPLOAD_FOLDER / unique_filename
         file.save(str(filepath)) 
         logging.info(f"File successfully uploaded and saved to: {filepath}")
         
-        # Return the filename—the key for the next API call
         return jsonify({
             "success": True,
             "message": "File uploaded successfully.",
-            "filename": filename 
+            "filename": unique_filename 
         }), 200
         
     except Exception as e:
@@ -223,13 +253,6 @@ def upload_file():
 def upload_file_from_openai():
     """
     Handles JSON payloads from the OpenAI Assistant that contain openaiFileIdRefs.
-    
-    Flow:
-    - Reads openaiFileIdRefs from JSON
-    - Downloads the file from the temporary link
-    - Validates extension
-    - Saves it into UPLOAD_FOLDER (transient local storage)
-    - Returns the filename so /convert can process it
     """
     data = request.get_json(silent=True) or {}
     refs = data.get('openaiFileIdRefs', [])
@@ -241,7 +264,6 @@ def upload_file_from_openai():
             "received_content_type": request.content_type
         }), 400
 
-    # Original openaiFileIdRefs logic
     first = refs[0]
     if isinstance(first, dict):
         download_link = first.get('download_link')
@@ -257,13 +279,11 @@ def upload_file_from_openai():
         }), 400
 
     try:
-        # 1. Download the file from the temporary link
         app.logger.info(f"Downloading file from: {download_link}")
         r = requests.get(download_link, stream=False, timeout=10)
         r.raise_for_status()
         file_content_bytes = r.content
 
-        # 2. Validate and sanitize filename
         filename_safe = secure_filename(original_name) or "uploaded_file"
         if '.' not in filename_safe:
             return jsonify({
@@ -277,19 +297,16 @@ def upload_file_from_openai():
                 "error": f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
             }), 400
 
-        # Extract extension and make filename unique
         base_name, ext = filename_safe.rsplit('.', 1)
         ext = ext.lower()
         unique_filename = f"{base_name}_{int(time.time())}.{ext}"
         file_path = UPLOAD_FOLDER / unique_filename
 
-        # 3. Save the downloaded file to disk (transient)
         with open(file_path, "wb") as f:
             f.write(file_content_bytes)
 
         app.logger.info(f"File downloaded from OpenAI and saved to: {file_path}")
 
-        # 4. Return filename (to be used as pdf_path in /convert)
         return jsonify({
             "success": True,
             "message": "File downloaded and saved successfully from openaiFileIdRefs.",
@@ -311,12 +328,13 @@ def upload_file_from_openai():
 
 
 # ----------------------------------------------------------------------
-# >>> STEP 2: CONVERT ROUTE (Processes file, deletes file) <<<
+# >>> STEP 2A: CONVERT ROUTE (OCR - Processes file to text) <<<
 # ----------------------------------------------------------------------
 @app.route('/convert', methods=['POST'])
 def convert_file_from_upload():
     """
     Handle PDF conversion by file path (the filename from the /upload or /api/upload-file step).
+    Converts to TEXT using OCR.
     """
     if not request.is_json:
         return jsonify({
@@ -325,8 +343,6 @@ def convert_file_from_upload():
         }), 400
     
     data = request.get_json()
-    
-    # pdf_path is now the filename returned from /upload or /api/upload-file
     filename = data.get('pdf_path') 
     
     if not filename or filename.strip() == '':
@@ -341,19 +357,16 @@ def convert_file_from_upload():
         max_pages = int(data.get('max_pages', 20))
         logging.info(f"Converting file from upload directory: {filename}")
         
-        # Convert PDF: The function now handles path resolution
         result = convert_PDF(filename, max_pages=max_pages)
         
         return jsonify(result)
         
     except FileNotFoundError as e:
-        # File was not found in the upload directory
         return jsonify({
             "success": False,
             "error": str(e)
         }), 404
     except RuntimeError as e:
-        # OCR processing failed
         return jsonify({
             "success": False, 
             "error": str(e)
@@ -365,7 +378,6 @@ def convert_file_from_upload():
             "error": f"Server error: {str(e)}"
         }), 500
     finally:
-        # CRITICAL: Clean up the file after processing (no long-term storage)
         if file_to_delete.exists():
             try:
                 os.remove(file_to_delete)
@@ -374,19 +386,160 @@ def convert_file_from_upload():
                 logging.warning(f"Failed to remove processed file: {e}")
 
 
+# ----------------------------------------------------------------------
+# >>> STEP 2B: CONVERT TO IMAGES (NEW - Returns URLs for GPT) <<<
+# ----------------------------------------------------------------------
+@app.route('/convert-to-images', methods=['POST'])
+def convert_pdf_to_images():
+    """
+    Convert PDF to JPEG images, save them to OUTPUT_FOLDER,
+    and return URLs that the GPT Assistant can access.
+    """
+    if not request.is_json:
+        return jsonify({
+            "success": False,
+            "error": "Content-Type must be application/json"
+        }), 400
+    
+    data = request.get_json()
+    filename = data.get('pdf_path')
+    
+    if not filename or filename.strip() == '':
+        return jsonify({
+            "success": False,
+            "error": "Missing 'pdf_path' parameter"
+        }), 400
+    
+    # Configuration
+    dpi = int(data.get('dpi', 200))
+    quality = int(data.get('quality', 85))
+    max_pages = int(data.get('max_pages', 50))
+    
+    pdf_path = UPLOAD_FOLDER / filename
+    
+    if not pdf_path.exists():
+        return jsonify({
+            "success": False,
+            "error": f"File '{filename}' not found"
+        }), 404
+    
+    try:
+        # Cleanup old files first
+        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
+        
+        # Convert PDF to images
+        logging.info(f"Converting PDF to images: {filename}")
+        pages = convert_from_path(pdf_path, dpi=dpi)
+        
+        # Limit pages
+        total_pages = len(pages)
+        if len(pages) > max_pages:
+            pages = pages[:max_pages]
+            truncated = True
+        else:
+            truncated = False
+        
+        # Save each page as JPEG
+        image_urls = []
+        base_name = filename.rsplit('.', 1)[0]
+        timestamp = int(time.time())
+        
+        for i, page in enumerate(pages):
+            # Create unique filename for each page
+            image_filename = f"{base_name}_page_{i+1}_{timestamp}.jpg"
+            image_path = OUTPUT_FOLDER / image_filename
+            
+            # Optimize and save
+            page.save(
+                str(image_path), 
+                'JPEG', 
+                quality=quality, 
+                optimize=True
+            )
+            
+            # Create URL that GPT can access
+            base_url = request.host_url.rstrip('/')
+            image_url = f"{base_url}/images/{image_filename}"
+            
+            image_urls.append({
+                "page": i + 1,
+                "url": image_url,
+                "filename": image_filename
+            })
+            
+            logging.info(f"Saved page {i+1}: {image_filename}")
+        
+        # Clean up original PDF
+        os.remove(pdf_path)
+        logging.info(f"Cleaned up PDF: {pdf_path}")
+        
+        return jsonify({
+            "success": True,
+            "message": "PDF converted to images successfully",
+            "total_pages": total_pages,
+            "converted_pages": len(image_urls),
+            "truncated": truncated,
+            "images": image_urls,
+            "note": "Images will be automatically deleted after 24 hours"
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Conversion error: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Conversion failed: {str(e)}"
+        }), 500
 
 
+# ----------------------------------------------------------------------
+# >>> STEP 3: SERVE IMAGES (GPT Assistant accesses these URLs) <<<
+# ----------------------------------------------------------------------
+@app.route('/images/<filename>', methods=['GET'])
+def serve_image(filename):
+    """
+    Serve the converted image files so GPT Assistant can access them.
+    This is the URL that will be returned in the conversion response.
+    """
+    try:
+        # Secure the filename to prevent directory traversal
+        safe_filename = secure_filename(filename)
+        image_path = OUTPUT_FOLDER / safe_filename
+        
+        if not image_path.exists():
+            return jsonify({
+                "success": False,
+                "error": "Image not found"
+            }), 404
+        
+        # Send the image file
+        return send_file(
+            str(image_path),
+            mimetype='image/jpeg',
+            as_attachment=False,
+            download_name=safe_filename
+        )
+        
+    except Exception as e:
+        logging.error(f"Error serving image: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# ----------------------------------------------------------------------
+# >>> BASE64 PROCESSING ROUTE <<<
+# ----------------------------------------------------------------------
 @app.route('/process-base64', methods=['POST'])
 def process_base64():
-    # 1. VALIDATION: Check for JSON
+    """Process base64 encoded files"""
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
     
     data = request.get_json()
     
-    # 2. EXTRACTION: Get your specific keys
-    input_filename = data.get('file_name')             # e.g., "Valeo.csv" (or .pdf)
-    base64_string = data.get('file_content_base64')    # The data string
+    input_filename = data.get('file_name')
+    base64_string = data.get('file_content_base64')
     
     if not input_filename or not base64_string:
         return jsonify({
@@ -394,23 +547,13 @@ def process_base64():
             "error": "Missing 'file_name' or 'file_content_base64' in payload"
         }), 400
 
-    # 3. FILENAME SETUP
-    # Extract the extension (e.g., .pdf, .png) from the user's filename
     _, ext = os.path.splitext(input_filename)
-    
-    # Create a unique name to avoid collisions: "uuid_Valeo.pdf"
-    # We use secure_filename to remove spaces/slashes from the user input
     safe_name = secure_filename(input_filename)
     unique_filename = f"{uuid.uuid4()}_{safe_name}"
     
     temp_file_path = UPLOAD_FOLDER / unique_filename
 
-    # Optional: Check if extension is allowed (based on your global ALLOWED_EXTENSIONS)
-    # if ext.lower().replace('.', '') not in ALLOWED_EXTENSIONS:
-    #     return jsonify({"success": False, "error": "File type not allowed"}), 400
-
     try:
-        # 4. DECODE & SAVE
         if "," in base64_string:
             base64_string = base64_string.split(",", 1)[1]
 
@@ -421,9 +564,6 @@ def process_base64():
         
         logging.info(f"Temp file saved: {unique_filename}")
 
-        # 5. PROCESS (OCR)
-        # Note: If you send a .csv, ensure convert_PDF can handle it. 
-        # Usually this function expects .pdf or images.
         max_pages = int(data.get('max_pages', 20))
         
         result = convert_PDF(unique_filename, max_pages=max_pages)
@@ -437,7 +577,6 @@ def process_base64():
         return jsonify({"success": False, "error": str(e)}), 500
         
     finally:
-        # 6. CLEANUP
         if temp_file_path.exists():
             try:
                 os.remove(temp_file_path)
@@ -445,104 +584,39 @@ def process_base64():
             except Exception as e:
                 logging.warning(f"Failed to delete temp file: {e}")
 
-def convert_PDF_to_JPG_base64(filename: str, dpi=300):
+
+# ----------------------------------------------------------------------
+# >>> CLEANUP ENDPOINT <<<
+# ----------------------------------------------------------------------
+@app.route('/cleanup', methods=['POST'])
+def manual_cleanup():
     """
-    Convert ALL pages from a PDF into Base64-encoded JPG images.
-    No truncation. No page limits.
+    Manually trigger cleanup of old files.
+    Useful for maintenance.
     """
-
-    pdf_path = UPLOAD_FOLDER / filename
-
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"File '{filename}' not found in upload directory")
-
     try:
-        # Load all PDF pages (no max_pages)
-        pages = convert_from_path(pdf_path, dpi=dpi)
-
-        images_b64 = []
-
-        for i, page in enumerate(pages):
-            buffer = io.BytesIO()
-            page.save(buffer, format="JPEG")
-            buffer.seek(0)
-
-            img_bytes = buffer.read()
-            b64_str = base64.b64encode(img_bytes).decode("utf-8")
-
-            images_b64.append({
-                "page": i + 1,
-                "data": f"data:image/jpeg;base64,{b64_str}"
-            })
-
-        return {
+        max_age = int(request.get_json(silent=True).get('max_age_hours', 1)) if request.is_json else 1
+        
+        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=max_age)
+        cleanup_old_files(UPLOAD_FOLDER, max_age_hours=max_age)
+        
+        return jsonify({
             "success": True,
-            "num_pages": len(images_b64),
-            "images": images_b64,
-            "filename": filename
-        }
-
+            "message": f"Cleanup completed (files older than {max_age} hours removed)"
+        }), 200
     except Exception as e:
-        raise RuntimeError(f"PDF-to-JPG conversion failed: {str(e)}")
-@app.route('/convert-jpg', methods=['POST'])
-def convert_file_to_jpg_base64():
-    """
-    Convert an uploaded PDF (via /upload or /api/upload-file)
-    to JPG Base64 images WITHOUT ANY TRUNCATION.
-    """
-
-    if not request.is_json:
         return jsonify({
             "success": False,
-            "error": "Content-Type must be application/json"
-        }), 400
-
-    data = request.get_json()
-    filename = data.get("pdf_path")
-
-    if not filename or filename.strip() == "":
-        return jsonify({
-            "success": False,
-            "error": "Missing 'pdf_path'"
-        }), 400
-
-    dpi = int(data.get("dpi", 300))  # adjustable resolution
-
-    pdf_path = UPLOAD_FOLDER / filename
-
-    try:
-        result = convert_PDF_to_JPG_base64(filename, dpi=dpi)
-        return jsonify(result), 200
-
-    except FileNotFoundError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
-
-    except RuntimeError as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-    except Exception as e:
-        logging.error(f"Error in convert-jpg endpoint: {e}")
-        return jsonify({
-            "success": False,
-            "error": f"Server error: {str(e)}"
+            "error": str(e)
         }), 500
-
-    finally:
-        # SAME CLEANUP BEHAVIOR AS /convert
-        if pdf_path.exists():
-            try:
-                os.remove(pdf_path)
-                logging.info(f"Cleaned up processed file: {pdf_path}")
-            except Exception:
-                pass
-
 
 
 if __name__ == "__main__":
-    logging.info("Starting Flask PDF OCR API")
+    logging.info("Starting Flask PDF OCR API with Image URL Support")
     use_GPU = torch.cuda.is_available()
     logging.info(f"Using GPU: {use_GPU}")
     logging.info(f"Upload folder: {UPLOAD_FOLDER}")
+    logging.info(f"Output folder: {OUTPUT_FOLDER}")
     logging.info("Flask API ready")
     logging.info("Access API at: http://localhost:5000")
     app.run(debug=True, host='0.0.0.0', port=5000)
