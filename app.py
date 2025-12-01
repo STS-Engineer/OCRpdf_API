@@ -143,7 +143,7 @@ def index():
     """API info endpoint"""
     return jsonify({
         "message": "PDF OCR API with Image URL Support",
-        "version": "5.0",
+        "version": "5.1",
         "endpoints": {
             "/upload": {
                 "method": "POST",
@@ -159,7 +159,7 @@ def index():
             },
             "/convert-to-images": {
                 "method": "POST",
-                "description": "Step 2 (New): Convert PDF to image URLs for GPT",
+                "description": "Step 2 (New): Convert PDF to image URLs for GPT (with wait time)",
             },
             "/images/<filename>": {
                 "method": "GET",
@@ -328,13 +328,14 @@ def upload_file_from_openai():
 
 
 # ----------------------------------------------------------------------
-# >>> STEP 2A: CONVERT ROUTE (OCR - Processes file to text) <<<
+# >>> STEP 2A: CONVERT ROUTE (OCR - Processes file to text) AVEC DÉLAI <<<
 # ----------------------------------------------------------------------
 @app.route('/convert', methods=['POST'])
 def convert_file_from_upload():
     """
     Handle PDF conversion by file path (the filename from the /upload or /api/upload-file step).
     Converts to TEXT using OCR.
+    Attend quelques secondes pour s'assurer que le fichier est complètement uploadé.
     """
     if not request.is_json:
         return jsonify({
@@ -351,13 +352,45 @@ def convert_file_from_upload():
             "error": "Missing 'pdf_path' (filename from /upload or /api/upload-file) parameter in JSON body"
         }), 400
     
+    # Configuration du délai d'attente
+    wait_time = int(data.get('wait_time', 3))  # 3 secondes par défaut
+    
     file_to_delete = UPLOAD_FOLDER / filename
+    
+    # ⏱️ ATTENDRE que le fichier soit complètement uploadé
+    logging.info(f"Waiting {wait_time} seconds for file to be fully uploaded...")
+    time.sleep(wait_time)
+    
+    # Vérifier si le fichier existe après l'attente
+    if not file_to_delete.exists():
+        # Attendre encore un peu et réessayer
+        logging.warning(f"File not found after {wait_time}s, waiting 2 more seconds...")
+        time.sleep(2)
+        
+        if not file_to_delete.exists():
+            return jsonify({
+                "success": False,
+                "error": f"File '{filename}' not found even after waiting {wait_time + 2} seconds"
+            }), 404
+    
+    # Vérifier que le fichier n'est pas vide
+    file_size = file_to_delete.stat().st_size
+    if file_size == 0:
+        return jsonify({
+            "success": False,
+            "error": "File is empty or still being written"
+        }), 400
+    
+    logging.info(f"File found and ready: {filename} ({file_size} bytes)")
     
     try:
         max_pages = int(data.get('max_pages', 20))
         logging.info(f"Converting file from upload directory: {filename}")
         
         result = convert_PDF(filename, max_pages=max_pages)
+        
+        # Ajouter le wait_time utilisé dans la réponse
+        result['wait_time_used'] = wait_time
         
         return jsonify(result)
         
@@ -387,13 +420,14 @@ def convert_file_from_upload():
 
 
 # ----------------------------------------------------------------------
-# >>> STEP 2B: CONVERT TO IMAGES (NEW - Returns URLs for GPT) <<<
+# >>> STEP 2B: CONVERT TO IMAGES (AVEC DÉLAI D'ATTENTE) <<<
 # ----------------------------------------------------------------------
 @app.route('/convert-to-images', methods=['POST'])
 def convert_pdf_to_images():
     """
     Convert PDF to JPEG images, save them to OUTPUT_FOLDER,
     and return URLs that the GPT Assistant can access.
+    Attend quelques secondes pour s'assurer que le fichier est complètement uploadé.
     """
     if not request.is_json:
         return jsonify({
@@ -414,14 +448,35 @@ def convert_pdf_to_images():
     dpi = int(data.get('dpi', 200))
     quality = int(data.get('quality', 85))
     max_pages = int(data.get('max_pages', 50))
+    wait_time = int(data.get('wait_time', 3))  # Délai configurable (3 secondes par défaut)
     
     pdf_path = UPLOAD_FOLDER / filename
     
+    # ⏱️ ATTENDRE que le fichier soit complètement uploadé
+    logging.info(f"Waiting {wait_time} seconds for file to be fully uploaded...")
+    time.sleep(wait_time)
+    
+    # Vérifier si le fichier existe après l'attente
     if not pdf_path.exists():
+        # Attendre encore un peu et réessayer
+        logging.warning(f"File not found after {wait_time}s, waiting 2 more seconds...")
+        time.sleep(2)
+        
+        if not pdf_path.exists():
+            return jsonify({
+                "success": False,
+                "error": f"File '{filename}' not found even after waiting {wait_time + 2} seconds"
+            }), 404
+    
+    # Vérifier que le fichier n'est pas vide et est complètement écrit
+    file_size = pdf_path.stat().st_size
+    if file_size == 0:
         return jsonify({
             "success": False,
-            "error": f"File '{filename}' not found"
-        }), 404
+            "error": "File is empty or still being written"
+        }), 400
+    
+    logging.info(f"File found and ready: {filename} ({file_size} bytes)")
     
     try:
         # Cleanup old files first
@@ -479,6 +534,7 @@ def convert_pdf_to_images():
             "total_pages": total_pages,
             "converted_pages": len(image_urls),
             "truncated": truncated,
+            "wait_time_used": wait_time,
             "images": image_urls,
             "note": "Images will be automatically deleted after 24 hours"
         }), 200
