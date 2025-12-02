@@ -21,7 +21,7 @@ from pdf2image import convert_from_path
 import io
 from PIL import Image
 import urllib.parse
-
+import psycopg2
 # --- CONFIGURATION ---
 UPLOAD_FOLDER = Path('/tmp/uploads')
 OUTPUT_FOLDER = Path('/tmp/output_images')  # Store converted images here
@@ -674,80 +674,110 @@ GITHUB_OWNER = "STS-Engineer"
 GITHUB_REPO = "RFQ-back"
 GITHUB_BRANCH = "main" # or 'master', check your repo
 
-@app.route('/process-rfq-from-github', methods=['POST'])
-def process_rfq_github():
+DB_CONFIG = {
+    "host": "avo-adb-002.postgres.database.azure.com",
+    "database": "RFQ_DATA",
+    "user": "administrationSTS",
+    "password": "St$@0987"
+}
+
+
+@app.route('/process-rfq-id', methods=['POST'])
+def process_rfq_by_id():
+    """
+    1. Accepts 'rfq_id' in JSON.
+    2. Queries Postgres to get 'rfq_file_path'.
+    3. Downloads file from Public GitHub.
+    4. Runs OCR.
+    """
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
 
     data = request.get_json()
-    rfq_path = data.get('rfq_file_path')
+    rfq_id = data.get('rfq_id')
 
-    if not rfq_path:
-        return jsonify({"success": False, "error": "Missing 'rfq_file_path'"}), 400
+    if not rfq_id:
+        return jsonify({"success": False, "error": "Missing 'rfq_id'"}), 400
 
     local_file_path = None
+    conn = None
 
     try:
-        # --- STEP 1: CONSTRUCT PUBLIC RAW URL ---
-        # Format: https://raw.githubusercontent.com/{USER}/{REPO}/{BRANCH}/{PATH}
+        # --- STEP 1: FETCH PATH FROM DB ---
+        logging.info(f"Connecting to DB to fetch path for RFQ ID: {rfq_id}")
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
         
-        # Clean the path (remove leading slash)
-        clean_path = rfq_path.strip("/")
+        # Query public.main for the path
+        query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
+        cur.execute(query, (rfq_id,))
+        result = cur.fetchone()
         
-        # Handle spaces in filenames (e.g., "my file.pdf" -> "my%20file.pdf")
-        # We use requests params or simple replacement for safety
-        import urllib.parse
+        if not result:
+            return jsonify({"success": False, "error": f"RFQ ID '{rfq_id}' not found in database"}), 404
+            
+        rfq_path_from_db = result[0]
+        
+        if not rfq_path_from_db:
+            return jsonify({"success": False, "error": "RFQ ID found, but 'rfq_file_path' is empty/null"}), 400
+
+        logging.info(f"Found path in DB: {rfq_path_from_db}")
+
+        # --- STEP 2: CONSTRUCT GITHUB URL & DOWNLOAD ---
+        # Clean path and encode URL
+        clean_path = rfq_path_from_db.strip("/")
         encoded_path = urllib.parse.quote(clean_path)
         
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
         
-        logging.info(f"Downloading from Public GitHub: {url}")
-        
-        # Download (No headers/auth needed for public raw files)
+        logging.info(f"Downloading from GitHub: {url}")
         response = requests.get(url, stream=True)
 
         if response.status_code == 404:
-            return jsonify({"success": False, "error": f"File not found on GitHub. Check path: {clean_path}"}), 404
+            return jsonify({"success": False, "error": f"File path from DB ({clean_path}) not found on GitHub."}), 404
         elif response.status_code != 200:
-            return jsonify({"success": False, "error": f"Download failed: {response.status_code}"}), 400
+            return jsonify({"success": False, "error": f"GitHub Download failed: {response.status_code}"}), 400
 
-        # --- STEP 2: SAVE LOCALLY (Simulate Upload) ---
-        original_filename = os.path.basename(clean_path)
-        # Decode the filename back to normal text if it was encoded
-        original_filename = urllib.parse.unquote(original_filename)
-        
+        # --- STEP 3: SAVE LOCALLY ---
+        original_filename = urllib.parse.unquote(os.path.basename(clean_path))
         safe_filename = secure_filename(original_filename)
-        base_name, ext = os.path.splitext(safe_filename)
-        unique_filename = f"{base_name}_{int(time.time())}{ext}"
+        
+        # Unique name
+        unique_filename = f"{rfq_id}_{int(time.time())}_{safe_filename}"
         local_file_path = UPLOAD_FOLDER / unique_filename
 
         with open(local_file_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-
-        logging.info(f"File saved locally: {local_file_path}")
-
-        # --- STEP 3: CONVERT ---
+        
+        # --- STEP 4: CONVERT (OCR) ---
         max_pages = int(data.get('max_pages', 20))
         result = convert_PDF(unique_filename, max_pages=max_pages)
-        result['source_rfq_path'] = rfq_path
+        
+        # Add metadata to response
+        result['rfq_id'] = rfq_id
+        result['source_path'] = rfq_path_from_db
         
         return jsonify(result)
 
+    except psycopg2.Error as db_err:
+        logging.error(f"Database error: {db_err}")
+        return jsonify({"success": False, "error": f"Database error: {str(db_err)}"}), 500
     except Exception as e:
-        logging.error(f"Error in GitHub processing: {e}")
+        logging.error(f"Processing error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-        
     finally:
-        # Cleanup
+        # Close DB connection
+        if conn:
+            cur.close()
+            conn.close()
+            
+        # Cleanup file
         if local_file_path and local_file_path.exists():
             try:
                 os.remove(local_file_path)
             except Exception as e:
                 logging.warning(f"Failed to cleanup: {e}")
-
-
-
 
 
 
