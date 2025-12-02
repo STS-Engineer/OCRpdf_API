@@ -20,7 +20,7 @@ from pdf2text import *
 from pdf2image import convert_from_path
 import io
 from PIL import Image
-
+import urllib.parse
 
 # --- CONFIGURATION ---
 UPLOAD_FOLDER = Path('/tmp/uploads')
@@ -665,6 +665,94 @@ def manual_cleanup():
             "success": False,
             "error": str(e)
         }), 500
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# --- CONFIGURATION (No Token Needed) ---
+GITHUB_OWNER = "STS-Engineer" 
+GITHUB_REPO = "RFQ-back"
+GITHUB_BRANCH = "main" # or 'master', check your repo
+
+@app.route('/process-rfq-from-github', methods=['POST'])
+def process_rfq_github():
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
+
+    data = request.get_json()
+    rfq_path = data.get('rfq_file_path')
+
+    if not rfq_path:
+        return jsonify({"success": False, "error": "Missing 'rfq_file_path'"}), 400
+
+    local_file_path = None
+
+    try:
+        # --- STEP 1: CONSTRUCT PUBLIC RAW URL ---
+        # Format: https://raw.githubusercontent.com/{USER}/{REPO}/{BRANCH}/{PATH}
+        
+        # Clean the path (remove leading slash)
+        clean_path = rfq_path.strip("/")
+        
+        # Handle spaces in filenames (e.g., "my file.pdf" -> "my%20file.pdf")
+        # We use requests params or simple replacement for safety
+        import urllib.parse
+        encoded_path = urllib.parse.quote(clean_path)
+        
+        url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
+        
+        logging.info(f"Downloading from Public GitHub: {url}")
+        
+        # Download (No headers/auth needed for public raw files)
+        response = requests.get(url, stream=True)
+
+        if response.status_code == 404:
+            return jsonify({"success": False, "error": f"File not found on GitHub. Check path: {clean_path}"}), 404
+        elif response.status_code != 200:
+            return jsonify({"success": False, "error": f"Download failed: {response.status_code}"}), 400
+
+        # --- STEP 2: SAVE LOCALLY (Simulate Upload) ---
+        original_filename = os.path.basename(clean_path)
+        # Decode the filename back to normal text if it was encoded
+        original_filename = urllib.parse.unquote(original_filename)
+        
+        safe_filename = secure_filename(original_filename)
+        base_name, ext = os.path.splitext(safe_filename)
+        unique_filename = f"{base_name}_{int(time.time())}{ext}"
+        local_file_path = UPLOAD_FOLDER / unique_filename
+
+        with open(local_file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logging.info(f"File saved locally: {local_file_path}")
+
+        # --- STEP 3: CONVERT ---
+        max_pages = int(data.get('max_pages', 20))
+        result = convert_PDF(unique_filename, max_pages=max_pages)
+        result['source_rfq_path'] = rfq_path
+        
+        return jsonify(result)
+
+    except Exception as e:
+        logging.error(f"Error in GitHub processing: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+        
+    finally:
+        # Cleanup
+        if local_file_path and local_file_path.exists():
+            try:
+                os.remove(local_file_path)
+            except Exception as e:
+                logging.warning(f"Failed to cleanup: {e}")
+
+
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
