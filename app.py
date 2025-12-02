@@ -22,6 +22,7 @@ import io
 from PIL import Image
 import urllib.parse
 import psycopg2
+import fitz
 # --- CONFIGURATION ---
 UPLOAD_FOLDER = Path('/tmp/uploads')
 OUTPUT_FOLDER = Path('/tmp/output_images')  # Store converted images here
@@ -778,6 +779,113 @@ def process_rfq_by_id():
                 os.remove(local_file_path)
             except Exception as e:
                 logging.warning(f"Failed to cleanup: {e}")
+
+
+
+@app.route('/process-rfq-id-to-images', methods=['POST'])
+def process_rfq_id_to_images_db():
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
+
+    data = request.get_json()
+    rfq_id = data.get('rfq_id')
+    # Quality settings
+    zoom_x = 2.0  # 2.0 = 200% resolution (approx 144 DPI)
+    zoom_y = 2.0
+    mat = fitz.Matrix(zoom_x, zoom_y) 
+
+    if not rfq_id:
+        return jsonify({"success": False, "error": "Missing 'rfq_id'"}), 400
+
+    local_pdf_path = None
+    conn = None
+
+    try:
+        # --- STEP 1: FETCH PATH FROM DB ---
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
+        cur.execute(query, (rfq_id,))
+        result = cur.fetchone()
+        
+        if not result or not result[0]:
+            return jsonify({"success": False, "error": "RFQ ID not found or path is empty"}), 404
+            
+        rfq_path_from_db = result[0]
+
+        # --- STEP 2: DOWNLOAD FROM GITHUB ---
+        clean_path = rfq_path_from_db.strip("/")
+        encoded_path = urllib.parse.quote(clean_path)
+        url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
+        
+        logging.info(f"Downloading: {url}")
+        response = requests.get(url, stream=True)
+
+        if response.status_code != 200:
+            return jsonify({"success": False, "error": f"GitHub Download failed: {response.status_code}"}), 400
+
+        # Save PDF locally
+        unique_pdf_name = f"{rfq_id}_{int(time.time())}.pdf"
+        local_pdf_path = UPLOAD_FOLDER / unique_pdf_name
+
+        with open(local_pdf_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # --- STEP 3: CONVERT TO IMAGES (Using PyMuPDF / fitz) ---
+        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
+        
+        doc = fitz.open(local_pdf_path) # Open the PDF
+        total_pages = len(doc)
+        
+        image_urls = []
+        timestamp = int(time.time())
+        base_url = request.host_url.rstrip('/')
+
+        # Loop through pages (even if it's just 1)
+        for i, page in enumerate(doc):
+            if i >= int(data.get('max_pages', 20)):
+                break
+                
+            pix = page.get_pixmap(matrix=mat) # Render page to image
+            
+            image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.jpg"
+            image_save_path = OUTPUT_FOLDER / image_filename
+            
+            # Save as JPEG
+            pix.save(str(image_save_path))
+            
+            image_urls.append({
+                "page": i + 1,
+                "url": f"{base_url}/images/{image_filename}",
+                "filename": image_filename
+            })
+
+        doc.close()
+
+        return jsonify({
+            "success": True,
+            "rfq_id": rfq_id,
+            "source_path": rfq_path_from_db,
+            "total_pages": total_pages,
+            "converted_pages": len(image_urls),
+            "images": image_urls
+        })
+
+    except Exception as e:
+        logging.error(f"Processing error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+        # Clean up PDF
+        if local_pdf_path and local_pdf_path.exists():
+            try:
+                os.remove(local_pdf_path)
+            except:
+                pass
+
+
 
 
 
