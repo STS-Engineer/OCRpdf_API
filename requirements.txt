@@ -14,4 +14,4 @@ requests
 werkzeug
 pdf2image
 Pillow
-
+psycopg2-binary
