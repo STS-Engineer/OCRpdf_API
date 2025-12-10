@@ -787,7 +787,7 @@ def process_rfq_id_to_images():
     rfq_id = data.get('rfq_id')
     
     # Quality settings - High resolution (144 DPI)
-    zoom_x = 2.0 
+    zoom_x = 2.0  
     zoom_y = 2.0
     mat = fitz.Matrix(zoom_x, zoom_y)
 
@@ -810,7 +810,7 @@ def process_rfq_id_to_images():
 
         if not result or not result[0]:
             return jsonify({
-                "success": False, 
+                "success": False,  
                 "error": f"RFQ ID '{rfq_id}' not found in database or path is empty"
             }), 404
 
@@ -827,12 +827,12 @@ def process_rfq_id_to_images():
 
         if response.status_code == 404:
             return jsonify({
-                "success": False, 
+                "success": False,  
                 "error": f"File path from DB ({clean_path}) not found on GitHub"
             }), 404
         elif response.status_code != 200:
             return jsonify({
-                "success": False, 
+                "success": False,  
                 "error": f"GitHub download failed with status code: {response.status_code}"
             }), 400
 
@@ -855,7 +855,7 @@ def process_rfq_id_to_images():
         if total_pages == 0:
             doc.close()
             return jsonify({
-                "success": False, 
+                "success": False,  
                 "error": "PDF contains no pages"
             }), 400
         
@@ -877,7 +877,8 @@ def process_rfq_id_to_images():
             image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.png"
             image_save_path = OUTPUT_FOLDER / image_filename
             
-            pix.save(str(image_save_path), format='png')
+            # FIX: Remove 'format=' keyword argument to resolve the error
+            pix.save(str(image_save_path))
             
             # Create URLs
             current_image_url = f"{base_url}/images/{image_filename}"
@@ -922,30 +923,29 @@ def process_rfq_id_to_images():
     except psycopg2.Error as db_err:
         logging.error(f"Database error: {db_err}")
         return jsonify({
-            "success": False, 
+            "success": False,  
             "error": f"Database error: {str(db_err)}"
         }), 500
     except Exception as e:
         logging.error(f"Processing error: {e}", exc_info=True)
         return jsonify({
-            "success": False, 
+            "success": False,  
             "error": f"Processing failed: {str(e)}"
         }), 500
     finally:
-        # Clean up database connection
+        # Close DB connection
         if conn:
-            cur.close()
-            conn.close()
-        
-        # Clean up temporary PDF file
+            with contextlib.suppress(Exception):
+                 cur.close()
+                 conn.close()
+                
+        # Cleanup file
         if local_pdf_path and local_pdf_path.exists():
             try:
                 os.remove(local_pdf_path)
-                logging.info(f"Cleaned up temporary PDF: {local_pdf_path}")
+                logging.info(f"Cleaned up PDF file: {local_pdf_path}")
             except Exception as e:
-                logging.warning(f"Failed to cleanup temporary PDF: {e}")
-
-
+                logging.warning(f"Failed to cleanup PDF: {e}")
 
 
 
