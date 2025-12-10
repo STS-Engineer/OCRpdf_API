@@ -789,10 +789,12 @@ def process_rfq_id_to_images_db():
 
     data = request.get_json()
     rfq_id = data.get('rfq_id')
+    
     # Quality settings
-    zoom_x = 2.0  # 2.0 = 200% resolution (approx 144 DPI)
+    # Conserver le zoom 2.0 pour une haute résolution (144 DPI)
+    zoom_x = 2.0 
     zoom_y = 2.0
-    mat = fitz.Matrix(zoom_x, zoom_y) 
+    mat = fitz.Matrix(zoom_x, zoom_y)
 
     if not rfq_id:
         return jsonify({"success": False, "error": "Missing 'rfq_id'"}), 400
@@ -807,17 +809,17 @@ def process_rfq_id_to_images_db():
         query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
         cur.execute(query, (rfq_id,))
         result = cur.fetchone()
-        
+
         if not result or not result[0]:
             return jsonify({"success": False, "error": "RFQ ID not found or path is empty"}), 404
-            
+
         rfq_path_from_db = result[0]
 
         # --- STEP 2: DOWNLOAD FROM GITHUB ---
         clean_path = rfq_path_from_db.strip("/")
         encoded_path = urllib.parse.quote(clean_path)
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
-        
+
         logging.info(f"Downloading: {url}")
         response = requests.get(url, stream=True)
 
@@ -832,44 +834,42 @@ def process_rfq_id_to_images_db():
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        # --- STEP 3: CONVERT TO IMAGES (Using PyMuPDF / fitz) ---
-        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
-        
+        # --- STEP 3: CONVERT FIRST PAGE TO IMAGE (PNG) ---
+        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24) 
+
         doc = fitz.open(local_pdf_path) # Open the PDF
         total_pages = len(doc)
         
-        image_urls = []
-        timestamp = int(time.time())
-        base_url = request.host_url.rstrip('/')
+        if total_pages == 0:
+             doc.close()
+             return jsonify({"success": False, "error": "PDF contains no pages"}), 400
+             
+        # Process ONLY the first page (index 0)
+        page = doc[0] 
+        pix = page.get_pixmap(matrix=mat) # Render page to image
 
-        # Loop through pages (even if it's just 1)
-        for i, page in enumerate(doc):
-            if i >= int(data.get('max_pages', 20)):
-                break
-                
-            pix = page.get_pixmap(matrix=mat) # Render page to image
-            
-            image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.jpg"
-            image_save_path = OUTPUT_FOLDER / image_filename
-            
-            # Save as JPEG
-            pix.save(str(image_save_path))
-            
-            image_urls.append({
-                "page": i + 1,
-                "url": f"{base_url}/images/{image_filename}",
-                "filename": image_filename
-            })
+        timestamp = int(time.time())
+        # CHANGÉ : Utilisation de l'extension .png pour la qualité sans perte
+        image_filename = f"{rfq_id}_page_1_{timestamp}.png" 
+        image_save_path = OUTPUT_FOLDER / image_filename
+
+        # CHANGÉ : Spécifier le format PNG pour l'enregistrement sans perte
+        pix.save(str(image_save_path), format='png') 
 
         doc.close()
+        
+        # Construct the final downloadable URL
+        base_url = request.host_url.rstrip('/')
+        download_url = f"{base_url}/images/{image_filename}" 
 
         return jsonify({
             "success": True,
             "rfq_id": rfq_id,
             "source_path": rfq_path_from_db,
             "total_pages": total_pages,
-            "converted_pages": len(image_urls),
-            "images": image_urls
+            "converted_page": 1, 
+            "download_url": download_url,
+            "filename": image_filename
         })
 
     except Exception as e:
@@ -878,14 +878,12 @@ def process_rfq_id_to_images_db():
     finally:
         if conn:
             conn.close()
-        # Clean up PDF
+        # Clean up temporary PDF
         if local_pdf_path and local_pdf_path.exists():
             try:
                 os.remove(local_pdf_path)
             except:
                 pass
-
-
 
 
 
