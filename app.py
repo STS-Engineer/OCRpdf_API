@@ -553,36 +553,25 @@ def convert_pdf_to_images():
 # ----------------------------------------------------------------------
 @app.route('/images/<filename>', methods=['GET'])
 def serve_image(filename):
-    """
-    Serve the converted image files so GPT Assistant can access them.
-    This is the URL that will be returned in the conversion response.
-    """
     try:
-        # Secure the filename to prevent directory traversal
         safe_filename = secure_filename(filename)
         image_path = OUTPUT_FOLDER / safe_filename
         
         if not image_path.exists():
-            return jsonify({
-                "success": False,
-                "error": "Image not found"
-            }), 404
+            return jsonify({"success": False, "error": "Image not found"}), 404
         
-        # Send the image file
+        # Determine MIME type based on extension
+        mime_type = 'image/png' if filename.lower().endswith('.png') else 'image/jpeg'
+        
         return send_file(
             str(image_path),
-            mimetype='image/jpeg',
+            mimetype=mime_type,
             as_attachment=False,
             download_name=safe_filename
         )
-        
     except Exception as e:
         logging.error(f"Error serving image: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ----------------------------------------------------------------------
 # >>> BASE64 PROCESSING ROUTE <<<
@@ -783,15 +772,21 @@ def process_rfq_by_id():
 
 
 @app.route('/process-rfq-id-to-images', methods=['POST'])
-def process_rfq_id_to_images_db():
+def process_rfq_id_to_images():
+    """
+    1. Accepts 'rfq_id' in JSON.
+    2. Queries Postgres to get 'rfq_file_path'.
+    3. Downloads file from Public GitHub.
+    4. Converts ALL pages to PNG images.
+    5. Returns array of image URLs with download links.
+    """
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
 
     data = request.get_json()
     rfq_id = data.get('rfq_id')
     
-    # Quality settings
-    # Conserver le zoom 2.0 pour une haute résolution (144 DPI)
+    # Quality settings - High resolution (144 DPI)
     zoom_x = 2.0 
     zoom_y = 2.0
     mat = fitz.Matrix(zoom_x, zoom_y)
@@ -801,90 +796,154 @@ def process_rfq_id_to_images_db():
 
     local_pdf_path = None
     conn = None
+    download_url_page_1 = None
 
     try:
         # --- STEP 1: FETCH PATH FROM DB ---
+        logging.info(f"Connecting to DB to fetch path for RFQ ID: {rfq_id}")
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        
         query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
         cur.execute(query, (rfq_id,))
         result = cur.fetchone()
 
         if not result or not result[0]:
-            return jsonify({"success": False, "error": "RFQ ID not found or path is empty"}), 404
+            return jsonify({
+                "success": False, 
+                "error": f"RFQ ID '{rfq_id}' not found in database or path is empty"
+            }), 404
 
         rfq_path_from_db = result[0]
+        logging.info(f"Found path in DB: {rfq_path_from_db}")
 
-        # --- STEP 2: DOWNLOAD FROM GITHUB ---
+        # --- STEP 2: CONSTRUCT GITHUB URL & DOWNLOAD ---
         clean_path = rfq_path_from_db.strip("/")
         encoded_path = urllib.parse.quote(clean_path)
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
 
-        logging.info(f"Downloading: {url}")
-        response = requests.get(url, stream=True)
+        logging.info(f"Downloading from GitHub: {url}")
+        response = requests.get(url, stream=True, timeout=30)
 
-        if response.status_code != 200:
-            return jsonify({"success": False, "error": f"GitHub Download failed: {response.status_code}"}), 400
+        if response.status_code == 404:
+            return jsonify({
+                "success": False, 
+                "error": f"File path from DB ({clean_path}) not found on GitHub"
+            }), 404
+        elif response.status_code != 200:
+            return jsonify({
+                "success": False, 
+                "error": f"GitHub download failed with status code: {response.status_code}"
+            }), 400
 
-        # Save PDF locally
+        # --- STEP 3: SAVE PDF LOCALLY ---
         unique_pdf_name = f"{rfq_id}_{int(time.time())}.pdf"
         local_pdf_path = UPLOAD_FOLDER / unique_pdf_name
 
         with open(local_pdf_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        
+        logging.info(f"PDF saved locally: {local_pdf_path}")
 
-        # --- STEP 3: CONVERT FIRST PAGE TO IMAGE (PNG) ---
-        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24) 
+        # --- STEP 4: CONVERT TO PNG IMAGES (High Quality) ---
+        cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
 
-        doc = fitz.open(local_pdf_path) # Open the PDF
+        doc = fitz.open(local_pdf_path)
         total_pages = len(doc)
         
         if total_pages == 0:
-             doc.close()
-             return jsonify({"success": False, "error": "PDF contains no pages"}), 400
-             
-        # Process ONLY the first page (index 0)
-        page = doc[0] 
-        pix = page.get_pixmap(matrix=mat) # Render page to image
-
+            doc.close()
+            return jsonify({
+                "success": False, 
+                "error": "PDF contains no pages"
+            }), 400
+        
+        # Get max_pages parameter (default: 20)
+        max_pages_to_convert = int(data.get('max_pages', 20))
+        
+        image_urls = []
         timestamp = int(time.time())
-        # CHANGÉ : Utilisation de l'extension .png pour la qualité sans perte
-        image_filename = f"{rfq_id}_page_1_{timestamp}.png" 
-        image_save_path = OUTPUT_FOLDER / image_filename
-
-        # CHANGÉ : Spécifier le format PNG pour l'enregistrement sans perte
-        pix.save(str(image_save_path), format='png') 
-
+        base_url = request.host_url.rstrip('/')
+        
+        # Convert each page to PNG (up to max_pages)
+        for i, page in enumerate(doc):
+            if i >= max_pages_to_convert:
+                break
+            
+            pix = page.get_pixmap(matrix=mat)
+            
+            # PNG format for lossless quality
+            image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.png"
+            image_save_path = OUTPUT_FOLDER / image_filename
+            
+            pix.save(str(image_save_path), format='png')
+            
+            # Create URLs
+            current_image_url = f"{base_url}/images/{image_filename}"
+            
+            image_urls.append({
+                "page": i + 1,
+                "url": current_image_url,
+                "download_link": current_image_url,  # Same URL for download
+                "filename": image_filename
+            })
+            
+            # Save first page URL separately
+            if i == 0:
+                download_url_page_1 = current_image_url
+            
+            logging.info(f"Converted page {i + 1}/{min(total_pages, max_pages_to_convert)}: {image_filename}")
+        
         doc.close()
         
-        # Construct the final downloadable URL
-        base_url = request.host_url.rstrip('/')
-        download_url = f"{base_url}/images/{image_filename}" 
-
+        # Final verification for download_url_page_1
+        if not download_url_page_1 and image_urls:
+            download_url_page_1 = image_urls[0]['url']
+        
+        # Determine if truncated
+        truncated = total_pages > max_pages_to_convert
+        
+        # --- STEP 5: RETURN RESULTS ---
         return jsonify({
             "success": True,
+            "message": "RFQ PDF converted to images successfully",
             "rfq_id": rfq_id,
             "source_path": rfq_path_from_db,
             "total_pages": total_pages,
-            "converted_page": 1, 
-            "download_url": download_url,
-            "filename": image_filename
-        })
+            "converted_pages": len(image_urls),
+            "truncated": truncated,
+            "max_pages": max_pages_to_convert,
+            "download_url_page_1_png": download_url_page_1,  # Quick access to first page
+            "images": image_urls,  # Complete list with download links
+            "note": "Images will be automatically deleted after 24 hours"
+        }), 200
 
+    except psycopg2.Error as db_err:
+        logging.error(f"Database error: {db_err}")
+        return jsonify({
+            "success": False, 
+            "error": f"Database error: {str(db_err)}"
+        }), 500
     except Exception as e:
-        logging.error(f"Processing error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logging.error(f"Processing error: {e}", exc_info=True)
+        return jsonify({
+            "success": False, 
+            "error": f"Processing failed: {str(e)}"
+        }), 500
     finally:
+        # Clean up database connection
         if conn:
+            cur.close()
             conn.close()
-        # Clean up temporary PDF
+        
+        # Clean up temporary PDF file
         if local_pdf_path and local_pdf_path.exists():
             try:
                 os.remove(local_pdf_path)
-            except:
-                pass
-
+                logging.info(f"Cleaned up temporary PDF: {local_pdf_path}")
+            except Exception as e:
+                logging.warning(f"Failed to cleanup temporary PDF: {e}")
 
 
 
