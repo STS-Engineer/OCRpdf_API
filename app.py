@@ -573,6 +573,15 @@ def serve_image(filename):
         logging.error(f"Error serving image: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route('/download-image/<filename>')
+def download_image(filename):
+    return send_from_directory(
+        OUTPUT_FOLDER,
+        filename,
+        as_attachment=True  # Forces download
+    )
+
 # ----------------------------------------------------------------------
 # >>> BASE64 PROCESSING ROUTE <<<
 # ----------------------------------------------------------------------
@@ -778,16 +787,17 @@ def process_rfq_id_to_images():
     2. Queries Postgres to get 'rfq_file_path'.
     3. Downloads file from Public GitHub.
     4. Converts ALL pages to PNG images.
-    5. Returns array of image URLs with download links.
+    5. Returns array of:
+        - url  (view image)
+        - lien_pour_telecharger_l_image (force-download image)
     """
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
 
     data = request.get_json()
     rfq_id = data.get('rfq_id')
-    
-    # Quality settings - High resolution (144 DPI)
-    zoom_x = 2.0  
+
+    zoom_x = 2.0
     zoom_y = 2.0
     mat = fitz.Matrix(zoom_x, zoom_y)
 
@@ -803,21 +813,21 @@ def process_rfq_id_to_images():
         logging.info(f"Connecting to DB to fetch path for RFQ ID: {rfq_id}")
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        
+
         query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
         cur.execute(query, (rfq_id,))
         result = cur.fetchone()
 
         if not result or not result[0]:
             return jsonify({
-                "success": False,  
+                "success": False,
                 "error": f"RFQ ID '{rfq_id}' not found in database or path is empty"
             }), 404
 
         rfq_path_from_db = result[0]
         logging.info(f"Found path in DB: {rfq_path_from_db}")
 
-        # --- STEP 2: CONSTRUCT GITHUB URL & DOWNLOAD ---
+        # --- STEP 2: DOWNLOAD FROM GITHUB ---
         clean_path = rfq_path_from_db.strip("/")
         encoded_path = urllib.parse.quote(clean_path)
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
@@ -826,15 +836,10 @@ def process_rfq_id_to_images():
         response = requests.get(url, stream=True, timeout=30)
 
         if response.status_code == 404:
-            return jsonify({
-                "success": False,  
-                "error": f"File path from DB ({clean_path}) not found on GitHub"
-            }), 404
+            return jsonify({"success": False, "error": f"File not found on GitHub: {clean_path}"}), 404
+
         elif response.status_code != 200:
-            return jsonify({
-                "success": False,  
-                "error": f"GitHub download failed with status code: {response.status_code}"
-            }), 400
+            return jsonify({"success": False, "error": f"GitHub download failed, status: {response.status_code}"}), 400
 
         # --- STEP 3: SAVE PDF LOCALLY ---
         unique_pdf_name = f"{rfq_id}_{int(time.time())}.pdf"
@@ -843,68 +848,59 @@ def process_rfq_id_to_images():
         with open(local_pdf_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        
+
         logging.info(f"PDF saved locally: {local_pdf_path}")
 
-        # --- STEP 4: CONVERT TO PNG IMAGES (High Quality) ---
+        # --- STEP 4: CONVERT PAGES TO IMAGES ---
         cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
 
         doc = fitz.open(local_pdf_path)
         total_pages = len(doc)
-        
+
         if total_pages == 0:
             doc.close()
-            return jsonify({
-                "success": False,  
-                "error": "PDF contains no pages"
-            }), 400
-        
-        # Get max_pages parameter (default: 20)
+            return jsonify({"success": False, "error": "PDF contains no pages"}), 400
+
         max_pages_to_convert = int(data.get('max_pages', 20))
-        
         image_urls = []
+
         timestamp = int(time.time())
         base_url = request.host_url.rstrip('/')
-        
-        # Convert each page to PNG (up to max_pages)
+
         for i, page in enumerate(doc):
             if i >= max_pages_to_convert:
                 break
-            
+
             pix = page.get_pixmap(matrix=mat)
-            
-            # PNG format for lossless quality
+
             image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.png"
             image_save_path = OUTPUT_FOLDER / image_filename
-            
-            # FIX: Remove 'format=' keyword argument to resolve the error
+
             pix.save(str(image_save_path))
-            
-            # Create URLs
-            current_image_url = f"{base_url}/images/{image_filename}"
-            
+
+            # --- URLS ---
+            view_url = f"{base_url}/images/{image_filename}"
+            download_url = f"{base_url}/download-image/{image_filename}"
+
             image_urls.append({
                 "page": i + 1,
-                "url": current_image_url,
-                "download_link": current_image_url,  # Same URL for download
+                "url": view_url,  # View normally
+                "lien_pour_telecharger_l_image": download_url,  # Forces download
                 "filename": image_filename
             })
-            
-            # Save first page URL separately
+
             if i == 0:
-                download_url_page_1 = current_image_url
-            
-            logging.info(f"Converted page {i + 1}/{min(total_pages, max_pages_to_convert)}: {image_filename}")
-        
+                download_url_page_1 = download_url
+
+            logging.info(f"Converted page {i+1}/{min(total_pages, max_pages_to_convert)}")
+
         doc.close()
-        
-        # Final verification for download_url_page_1
+
         if not download_url_page_1 and image_urls:
-            download_url_page_1 = image_urls[0]['url']
-        
-        # Determine if truncated
+            download_url_page_1 = image_urls[0]["lien_pour_telecharger_l_image"]
+
         truncated = total_pages > max_pages_to_convert
-        
+
         # --- STEP 5: RETURN RESULTS ---
         return jsonify({
             "success": True,
@@ -915,39 +911,31 @@ def process_rfq_id_to_images():
             "converted_pages": len(image_urls),
             "truncated": truncated,
             "max_pages": max_pages_to_convert,
-            "download_url_page_1_png": download_url_page_1,  # Quick access to first page
-            "images": image_urls,  # Complete list with download links
+            "download_url_page_1_png": download_url_page_1,
+            "images": image_urls,
             "note": "Images will be automatically deleted after 24 hours"
         }), 200
 
     except psycopg2.Error as db_err:
         logging.error(f"Database error: {db_err}")
-        return jsonify({
-            "success": False,  
-            "error": f"Database error: {str(db_err)}"
-        }), 500
+        return jsonify({"success": False, "error": f"Database error: {str(db_err)}"}), 500
+
     except Exception as e:
         logging.error(f"Processing error: {e}", exc_info=True)
-        return jsonify({
-            "success": False,  
-            "error": f"Processing failed: {str(e)}"
-        }), 500
+        return jsonify({"success": False, "error": f"Processing failed: {str(e)}"}), 500
+
     finally:
-        # Close DB connection
         if conn:
             with contextlib.suppress(Exception):
-                 cur.close()
-                 conn.close()
-                
-        # Cleanup file
+                cur.close()
+                conn.close()
+
         if local_pdf_path and local_pdf_path.exists():
             try:
                 os.remove(local_pdf_path)
                 logging.info(f"Cleaned up PDF file: {local_pdf_path}")
             except Exception as e:
                 logging.warning(f"Failed to cleanup PDF: {e}")
-
-
 
 
 if __name__ == "__main__":
