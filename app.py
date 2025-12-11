@@ -9,7 +9,7 @@ import binascii
 
 import requests
 from werkzeug.utils import secure_filename
-
+rom werkzeug.middleware.proxy_fix import ProxyFix
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import nltk
 import torch
@@ -34,7 +34,8 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
-
+# Ceci indique à Flask de faire confiance aux en-têtes du proxy Azure (X-Forwarded-Proto)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 # Ensure directories exist
 UPLOAD_FOLDER.mkdir(exist_ok=True, parents=True)
 OUTPUT_FOLDER.mkdir(exist_ok=True, parents=True)
