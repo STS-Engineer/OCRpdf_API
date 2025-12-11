@@ -9,7 +9,7 @@ import binascii
 
 import requests
 from werkzeug.utils import secure_filename
-rom werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import nltk
 import torch
