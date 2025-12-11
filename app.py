@@ -10,7 +10,7 @@ import binascii
 import requests
 from werkzeug.utils import secure_filename
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 import nltk
 import torch
 import base64
@@ -165,6 +165,10 @@ def index():
             "/images/<filename>": {
                 "method": "GET",
                 "description": "Serve converted images to GPT Assistant",
+            },
+            "/download-image/<filename>": {
+                "method": "GET",
+                "description": "Force download of converted images",
             },
             "/process-base64": {
                 "method": "POST",
@@ -553,6 +557,7 @@ def convert_pdf_to_images():
 # ----------------------------------------------------------------------
 @app.route('/images/<filename>', methods=['GET'])
 def serve_image(filename):
+    """Serve image for viewing in browser"""
     try:
         safe_filename = secure_filename(filename)
         image_path = OUTPUT_FOLDER / safe_filename
@@ -574,13 +579,34 @@ def serve_image(filename):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/download-image/<filename>')
+@app.route('/download-image/<filename>', methods=['GET'])
 def download_image(filename):
-    return send_from_directory(
-        OUTPUT_FOLDER,
-        filename,
-        as_attachment=True  # Forces download
-    )
+    """Force download of image file"""
+    try:
+        safe_filename = secure_filename(filename)
+        image_path = OUTPUT_FOLDER / safe_filename
+        
+        if not image_path.exists():
+            return jsonify({"success": False, "error": "Image not found"}), 404
+        
+        # Determine MIME type based on extension
+        if filename.lower().endswith('.png'):
+            mime_type = 'image/png'
+        elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'):
+            mime_type = 'image/jpeg'
+        else:
+            mime_type = 'application/octet-stream'
+        
+        return send_file(
+            str(image_path),
+            mimetype=mime_type,
+            as_attachment=True,  # This forces download
+            download_name=safe_filename
+        )
+    except Exception as e:
+        logging.error(f"Error downloading image: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 # ----------------------------------------------------------------------
 # >>> BASE64 PROCESSING ROUTE <<<
