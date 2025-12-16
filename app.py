@@ -102,21 +102,21 @@ def convert_PDF(filename: str, max_pages=20):
     """
     rm_local_text_files()
     global ocr_model
-
+    
     st = time.perf_counter()
     file_path = UPLOAD_FOLDER / filename
-
+    
     if not file_path.exists():
         logging.error(f"File {file_path} does not exist")
         raise FileNotFoundError(f"File '{filename}' not found on server. Did you call /upload or /api/upload-file first?")
-
+    
     try:
         conversion_stats = convert_PDF_to_Text(
             file_path,
             ocr_model=ocr_model,
             max_pages=max_pages,
         )
-
+        
         converted_txt = conversion_stats["converted_text"]
         num_pages = conversion_stats["num_pages"]
         was_truncated = conversion_stats["truncated"]
@@ -133,7 +133,7 @@ def convert_PDF(filename: str, max_pages=20):
             "max_pages": max_pages,
             "filename": filename
         }
-
+        
     except Exception as e:
         logging.error(f"Error converting file: {e}")
         raise RuntimeError(f"OCR processing failed: {str(e)}")
@@ -214,36 +214,36 @@ def upload_file():
             "success": False,
             "error": "No file provided. Please upload a file using 'file' field in form-data"
         }), 400
-
+    
     file = request.files['file']
-
+    
     if file.filename == '':
         return jsonify({
             "success": False,
             "error": "No file selected"
         }), 400
-
+    
     if not allowed_file(file.filename):
         return jsonify({
             "success": False,
             "error": f"Invalid file type. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"
         }), 400
-
+    
     try:
         filename = secure_filename(file.filename)
         base_name, ext = filename.rsplit('.', 1)
         unique_filename = f"{base_name}_{int(time.time())}.{ext}"
-
+        
         filepath = UPLOAD_FOLDER / unique_filename
         file.save(str(filepath)) 
         logging.info(f"File successfully uploaded and saved to: {filepath}")
-
+        
         return jsonify({
             "success": True,
             "message": "File uploaded successfully.",
             "filename": unique_filename 
         }), 200
-
+        
     except Exception as e:
         logging.error(f"Error in upload endpoint: {e}")
         return jsonify({
@@ -348,37 +348,37 @@ def convert_file_from_upload():
             "success": False, 
             "error": "Content-Type must be application/json"
         }), 400
-
+    
     data = request.get_json()
     filename = data.get('pdf_path') 
-
+    
     if not filename or filename.strip() == '':
         return jsonify({
             "success": False, 
             "error": "Missing 'pdf_path' (filename from /upload or /api/upload-file) parameter in JSON body"
         }), 400
-
+    
     # Configuration du délai d'attente
     wait_time = int(data.get('wait_time', 3))  # 3 secondes par défaut
-
+    
     file_to_delete = UPLOAD_FOLDER / filename
-
+    
     # ⏱️ ATTENDRE que le fichier soit complètement uploadé
     logging.info(f"Waiting {wait_time} seconds for file to be fully uploaded...")
     time.sleep(wait_time)
-
+    
     # Vérifier si le fichier existe après l'attente
     if not file_to_delete.exists():
         # Attendre encore un peu et réessayer
         logging.warning(f"File not found after {wait_time}s, waiting 2 more seconds...")
         time.sleep(2)
-
+        
         if not file_to_delete.exists():
             return jsonify({
                 "success": False,
                 "error": f"File '{filename}' not found even after waiting {wait_time + 2} seconds"
             }), 404
-
+    
     # Vérifier que le fichier n'est pas vide
     file_size = file_to_delete.stat().st_size
     if file_size == 0:
@@ -386,20 +386,20 @@ def convert_file_from_upload():
             "success": False,
             "error": "File is empty or still being written"
         }), 400
-
+    
     logging.info(f"File found and ready: {filename} ({file_size} bytes)")
-
+    
     try:
         max_pages = int(data.get('max_pages', 20))
         logging.info(f"Converting file from upload directory: {filename}")
-
+        
         result = convert_PDF(filename, max_pages=max_pages)
-
+        
         # Ajouter le wait_time utilisé dans la réponse
         result['wait_time_used'] = wait_time
-
+        
         return jsonify(result)
-
+        
     except FileNotFoundError as e:
         return jsonify({
             "success": False,
@@ -440,40 +440,40 @@ def convert_pdf_to_images():
             "success": False,
             "error": "Content-Type must be application/json"
         }), 400
-
+    
     data = request.get_json()
     filename = data.get('pdf_path')
-
+    
     if not filename or filename.strip() == '':
         return jsonify({
             "success": False,
             "error": "Missing 'pdf_path' parameter"
         }), 400
-
+    
     # Configuration
     dpi = int(data.get('dpi', 200))
     quality = int(data.get('quality', 85))
     max_pages = int(data.get('max_pages', 50))
     wait_time = int(data.get('wait_time', 3))  # Délai configurable (3 secondes par défaut)
-
+    
     pdf_path = UPLOAD_FOLDER / filename
-
+    
     # ⏱️ ATTENDRE que le fichier soit complètement uploadé
     logging.info(f"Waiting {wait_time} seconds for file to be fully uploaded...")
     time.sleep(wait_time)
-
+    
     # Vérifier si le fichier existe après l'attente
     if not pdf_path.exists():
         # Attendre encore un peu et réessayer
         logging.warning(f"File not found after {wait_time}s, waiting 2 more seconds...")
         time.sleep(2)
-
+        
         if not pdf_path.exists():
             return jsonify({
                 "success": False,
                 "error": f"File '{filename}' not found even after waiting {wait_time + 2} seconds"
             }), 404
-
+    
     # Vérifier que le fichier n'est pas vide et est complètement écrit
     file_size = pdf_path.stat().st_size
     if file_size == 0:
@@ -481,17 +481,17 @@ def convert_pdf_to_images():
             "success": False,
             "error": "File is empty or still being written"
         }), 400
-
+    
     logging.info(f"File found and ready: {filename} ({file_size} bytes)")
-
+    
     try:
         # Cleanup old files first
         cleanup_old_files(OUTPUT_FOLDER, max_age_hours=24)
-
+        
         # Convert PDF to images
         logging.info(f"Converting PDF to images: {filename}")
         pages = convert_from_path(pdf_path, dpi=dpi)
-
+        
         # Limit pages
         total_pages = len(pages)
         if len(pages) > max_pages:
@@ -499,17 +499,17 @@ def convert_pdf_to_images():
             truncated = True
         else:
             truncated = False
-
+        
         # Save each page as JPEG
         image_urls = []
         base_name = filename.rsplit('.', 1)[0]
         timestamp = int(time.time())
-
+        
         for i, page in enumerate(pages):
             # Create unique filename for each page
             image_filename = f"{base_name}_page_{i+1}_{timestamp}.jpg"
             image_path = OUTPUT_FOLDER / image_filename
-
+            
             # Optimize and save
             page.save(
                 str(image_path), 
@@ -517,23 +517,23 @@ def convert_pdf_to_images():
                 quality=quality, 
                 optimize=True
             )
-
+            
             # Create URL that GPT can access
             base_url = request.host_url.rstrip('/')
             image_url = f"{base_url}/images/{image_filename}"
-
+            
             image_urls.append({
                 "page": i + 1,
                 "url": image_url,
                 "filename": image_filename
             })
-
+            
             logging.info(f"Saved page {i+1}: {image_filename}")
-
+        
         # Clean up original PDF
         os.remove(pdf_path)
         logging.info(f"Cleaned up PDF: {pdf_path}")
-
+        
         return jsonify({
             "success": True,
             "message": "PDF converted to images successfully",
@@ -544,7 +544,7 @@ def convert_pdf_to_images():
             "images": image_urls,
             "note": "Images will be automatically deleted after 24 hours"
         }), 200
-
+        
     except Exception as e:
         logging.error(f"Conversion error: {e}")
         return jsonify({
@@ -559,28 +559,22 @@ def convert_pdf_to_images():
 @app.route('/images/<filename>', methods=['GET'])
 def serve_image(filename):
     """Serve image for viewing in browser"""
-
-
-
     try:
-
         safe_filename = secure_filename(filename)
         image_path = OUTPUT_FOLDER / safe_filename
-
+        
         if not image_path.exists():
             return jsonify({"success": False, "error": "Image not found"}), 404
         
         # Determine MIME type based on extension
         mime_type = 'image/png' if filename.lower().endswith('.png') else 'image/jpeg'
-
-
+        
         return send_file(
             str(image_path),
             mimetype=mime_type,
             as_attachment=False,
             download_name=safe_filename
         )
-
     except Exception as e:
         logging.error(f"Error serving image: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -623,12 +617,12 @@ def process_base64():
     """Process base64 encoded files"""
     if not request.is_json:
         return jsonify({"success": False, "error": "Content-Type must be application/json"}), 400
-
+    
     data = request.get_json()
-
+    
     input_filename = data.get('file_name')
     base64_string = data.get('file_content_base64')
-
+    
     if not input_filename or not base64_string:
         return jsonify({
             "success": False, 
@@ -638,7 +632,7 @@ def process_base64():
     _, ext = os.path.splitext(input_filename)
     safe_name = secure_filename(input_filename)
     unique_filename = f"{uuid.uuid4()}_{safe_name}"
-
+    
     temp_file_path = UPLOAD_FOLDER / unique_filename
 
     try:
@@ -646,16 +640,16 @@ def process_base64():
             base64_string = base64_string.split(",", 1)[1]
 
         file_content = base64.b64decode(base64_string)
-
+        
         with open(temp_file_path, "wb") as f:
             f.write(file_content)
-
+        
         logging.info(f"Temp file saved: {unique_filename}")
 
         max_pages = int(data.get('max_pages', 20))
-
+        
         result = convert_PDF(unique_filename, max_pages=max_pages)
-
+        
         return jsonify(result)
 
     except (binascii.Error, ValueError):
@@ -663,7 +657,7 @@ def process_base64():
     except Exception as e:
         logging.error(f"Error in base64 processing: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-
+        
     finally:
         if temp_file_path.exists():
             try:
@@ -684,10 +678,10 @@ def manual_cleanup():
     """
     try:
         max_age = int(request.get_json(silent=True).get('max_age_hours', 1)) if request.is_json else 1
-
+        
         cleanup_old_files(OUTPUT_FOLDER, max_age_hours=max_age)
         cleanup_old_files(UPLOAD_FOLDER, max_age_hours=max_age)
-
+        
         return jsonify({
             "success": True,
             "message": f"Cleanup completed (files older than {max_age} hours removed)"
@@ -739,17 +733,17 @@ def process_rfq_by_id():
         logging.info(f"Connecting to DB to fetch path for RFQ ID: {rfq_id}")
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-
+        
         # Query public.main for the path
         query = "SELECT rfq_file_path FROM public.main WHERE rfq_id = %s"
         cur.execute(query, (rfq_id,))
         result = cur.fetchone()
-
+        
         if not result:
             return jsonify({"success": False, "error": f"RFQ ID '{rfq_id}' not found in database"}), 404
-
+            
         rfq_path_from_db = result[0]
-
+        
         if not rfq_path_from_db:
             return jsonify({"success": False, "error": "RFQ ID found, but 'rfq_file_path' is empty/null"}), 400
 
@@ -759,9 +753,9 @@ def process_rfq_by_id():
         # Clean path and encode URL
         clean_path = rfq_path_from_db.strip("/")
         encoded_path = urllib.parse.quote(clean_path)
-
+        
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
-
+        
         logging.info(f"Downloading from GitHub: {url}")
         response = requests.get(url, stream=True)
 
@@ -773,7 +767,7 @@ def process_rfq_by_id():
         # --- STEP 3: SAVE LOCALLY ---
         original_filename = urllib.parse.unquote(os.path.basename(clean_path))
         safe_filename = secure_filename(original_filename)
-
+        
         # Unique name
         unique_filename = f"{rfq_id}_{int(time.time())}_{safe_filename}"
         local_file_path = UPLOAD_FOLDER / unique_filename
@@ -781,15 +775,15 @@ def process_rfq_by_id():
         with open(local_file_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-
+        
         # --- STEP 4: CONVERT (OCR) ---
         max_pages = int(data.get('max_pages', 20))
         result = convert_PDF(unique_filename, max_pages=max_pages)
-
+        
         # Add metadata to response
         result['rfq_id'] = rfq_id
         result['source_path'] = rfq_path_from_db
-
+        
         return jsonify(result)
 
     except psycopg2.Error as db_err:
@@ -803,7 +797,7 @@ def process_rfq_by_id():
         if conn:
             cur.close()
             conn.close()
-
+            
         # Cleanup file
         if local_file_path and local_file_path.exists():
             try:
@@ -865,9 +859,6 @@ def process_rfq_id_to_images():
         encoded_path = urllib.parse.quote(clean_path)
         url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{encoded_path}"
 
-
-
-
         logging.info(f"Downloading from GitHub: {url}")
         response = requests.get(url, stream=True, timeout=30)
 
@@ -903,7 +894,6 @@ def process_rfq_id_to_images():
         timestamp = int(time.time())
         base_url = request.host_url.rstrip('/')
 
-
         for i, page in enumerate(doc):
             if i >= max_pages_to_convert:
                 break
@@ -912,7 +902,6 @@ def process_rfq_id_to_images():
 
             image_filename = f"{rfq_id}_page_{i+1}_{timestamp}.png"
             image_save_path = OUTPUT_FOLDER / image_filename
-
 
             pix.save(str(image_save_path))
 
@@ -974,7 +963,6 @@ def process_rfq_id_to_images():
                 logging.info(f"Cleaned up PDF file: {local_pdf_path}")
             except Exception as e:
                 logging.warning(f"Failed to cleanup PDF: {e}")
-
 
 
 if __name__ == "__main__":
