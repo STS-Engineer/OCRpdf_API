@@ -16,6 +16,5 @@ pdf2image
 Pillow
 psycopg2-binary
 pymupdf
-paddleocr
-paddlepaddle
+
 
